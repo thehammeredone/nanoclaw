@@ -43,6 +43,8 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
+  env?: Record<string, string>;
+  blockedHosts?: string[];
 }
 
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
@@ -81,6 +83,19 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   const config = configFromDb(row, group);
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
+
+  // Preserve manually-set env/blockedHosts from an existing container.json —
+  // these fields are not stored in the DB so direct edits must survive respawns.
+  if (fs.existsSync(p)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(p, 'utf8')) as Partial<ContainerConfig>;
+      if (existing.env) config.env = existing.env;
+      if (existing.blockedHosts) config.blockedHosts = existing.blockedHosts;
+    } catch {
+      // ignore parse errors — stale file will be overwritten below
+    }
+  }
+
   const dir = path.dirname(p);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
