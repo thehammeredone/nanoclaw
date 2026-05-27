@@ -47,6 +47,10 @@ export interface MessagingGroup {
    * the column itself defaults to NULL in SQLite.
    */
   denied_at?: string | null;
+  /** Platform message id of the last message seen on this channel. Used for
+   *  missed-message catch-up on startup. Set on every routed chat-sdk message;
+   *  NULL on first deploy until the first restart after migration 016. */
+  last_seen_message_id?: string | null;
   created_at: string;
 }
 

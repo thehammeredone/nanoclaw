@@ -25,6 +25,14 @@ import { getAskQuestionRender } from '../db/sessions.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 
+/** Adapter with optional fetchChannelMessages support (e.g., Discord). */
+interface FetchableAdapter extends Adapter {
+  fetchChannelMessages?(
+    channelId: string,
+    options?: { cursor?: string; direction?: 'forward' | 'backward'; limit?: number },
+  ): Promise<{ messages: ChatMessage[]; nextCursor?: string }>;
+}
+
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
   startGatewayListener?(
@@ -545,6 +553,69 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     bridge.openDM = async (userHandle: string): Promise<string> => {
       const threadId = await adapter.openDM!(userHandle);
       return adapter.channelIdFromThreadId(threadId);
+    };
+  }
+
+  // Only expose fetchHistory when the underlying Chat SDK adapter supports
+  // fetchChannelMessages (Discord does; most others don't).
+  if (typeof (adapter as FetchableAdapter).fetchChannelMessages === 'function') {
+    bridge.fetchHistory = async (
+      platformId: string,
+      sinceMessageId: string | null,
+      limit: number,
+      isGroup: boolean,
+    ): Promise<{ latestMessageId: string | null }> => {
+      const fetchable = adapter as FetchableAdapter;
+
+      if (sinceMessageId === null) {
+        // Bootstrap: just anchor on the newest message; don't replay history.
+        const result = await fetchable.fetchChannelMessages!(platformId, { direction: 'backward', limit: 1 });
+        const latestId = result.messages.length > 0 ? result.messages[result.messages.length - 1].id : null;
+        return { latestMessageId: latestId };
+      }
+
+      // Catch-up: fetch one backward page (up to `limit` most recent), then
+      // replay every message that came after the stored cursor.
+      const result = await fetchable.fetchChannelMessages!(platformId, { direction: 'backward', limit });
+      const messages = result.messages; // chronological, oldest-first
+
+      const idx = messages.findIndex((m) => m.id === sinceMessageId);
+      let toReplay: ChatMessage[];
+      if (idx === -1) {
+        // Cursor not in page — backlog exceeded the cap or the message was
+        // deleted. Replay the full page (10 most recent) and warn.
+        log.warn('catch-up: sinceMessageId not in fetched page, replaying full page', {
+          adapter: adapter.name,
+          platformId,
+          sinceMessageId,
+          pageSize: messages.length,
+        });
+        toReplay = messages;
+      } else {
+        toReplay = messages.slice(idx + 1);
+      }
+
+      for (const message of toReplay) {
+        const channelId = adapter.channelIdFromThreadId(message.threadId);
+        // message.isMention may be undefined for REST-fetched messages (the
+        // adapter's REST path doesn't set it; only the Gateway path does).
+        // Fall back to inspecting the raw Discord message's mentions array.
+        const isMention =
+          message.isMention ??
+          (adapter.botUserId != null &&
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            Array.isArray((message.raw as any)?.mentions) &&
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (message.raw as any).mentions.some((m: any) => m.id === adapter.botUserId));
+        await setupConfig.onInbound(
+          channelId,
+          message.threadId,
+          await messageToInbound(message, isMention === true, isGroup),
+        );
+      }
+
+      const latestId = messages.length > 0 ? messages[messages.length - 1].id : null;
+      return { latestMessageId: latestId };
     };
   }
 

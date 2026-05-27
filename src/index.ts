@@ -16,6 +16,7 @@ import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runti
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
+import { getAllMessagingGroups, getMessagingGroupWithAgentCount, setMessagingGroupLastSeen } from './db/index.js';
 import { log } from './log.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
@@ -62,6 +63,47 @@ import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
+
+/**
+ * On startup, fetch recent history for every wired channel whose adapter
+ * supports it, and replay any messages that arrived while the service was
+ * down. Capped at 10 messages per channel (one backward page). Channels with
+ * no wired agents or no fetchHistory support are skipped silently.
+ *
+ * First-deploy: channels with a NULL cursor set an anchor without replaying,
+ * so ancient history is never flooded. Catch-up is live from the next restart.
+ */
+async function catchUpMissedMessages(): Promise<void> {
+  const groups = getAllMessagingGroups();
+  let checked = 0;
+
+  for (const mg of groups) {
+    try {
+      const found = getMessagingGroupWithAgentCount(mg.channel_type, mg.platform_id);
+      if (!found || found.agentCount === 0) continue;
+
+      const adapter = getChannelAdapter(mg.channel_type);
+      if (!adapter?.fetchHistory) continue;
+
+      const { latestMessageId } = await adapter.fetchHistory(
+        mg.platform_id,
+        mg.last_seen_message_id ?? null,
+        10,
+        mg.is_group === 1,
+      );
+      if (latestMessageId) setMessagingGroupLastSeen(mg.id, latestMessageId);
+      checked++;
+    } catch (err) {
+      log.warn('Catch-up failed for channel', {
+        channelType: mg.channel_type,
+        platformId: mg.platform_id,
+        err,
+      });
+    }
+  }
+
+  if (checked > 0) log.info('Catch-up complete', { channels: checked });
+}
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -176,6 +218,11 @@ async function main(): Promise<void> {
 
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
+
+  // 8. Non-blocking catch-up: replay messages missed while the service was
+  //    down. Delivery polls are already running so replayed wakes get their
+  //    responses delivered without waiting for this to finish.
+  void catchUpMissedMessages().catch((err) => log.error('Catch-up failed', { err }));
 
   log.info('NanoClaw running');
 }

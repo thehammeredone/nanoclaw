@@ -1,8 +1,26 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
 import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import type { ChannelSetup, InboundMessage } from './adapter.js';
+
+// Mock Chat to prevent gateway / WebSocket initialization in unit tests.
+vi.mock('chat', async () => {
+  const actual = await vi.importActual<typeof import('chat')>('chat');
+  return {
+    ...actual,
+    Chat: class {
+      onSubscribedMessage() {}
+      onNewMention() {}
+      onDirectMessage() {}
+      onNewMessage() {}
+      onAction() {}
+      async initialize() {}
+      async shutdown() {}
+    },
+  };
+});
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
@@ -90,6 +108,153 @@ describe('createChatSdkBridge', () => {
       supportsThreads: true,
     });
     expect(typeof bridge.subscribe).toBe('function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchHistory
+// ---------------------------------------------------------------------------
+
+/** Minimal fake of a Chat SDK Message for catch-up tests. */
+function fakeMessage(id: string, threadId = 'thread-001', isMention = false) {
+  return {
+    id,
+    threadId,
+    isMention,
+    toJSON: () => ({
+      id,
+      text: `message ${id}`,
+      author: { userId: 'u1', fullName: 'User One' },
+    }),
+    attachments: [],
+    metadata: { dateSent: new Date('2025-01-01T00:00:00.000Z') },
+    raw: undefined,
+  };
+}
+
+/** Build a stub adapter that implements fetchChannelMessages returning `msgs`. */
+function fetchableAdapter(msgs: ReturnType<typeof fakeMessage>[]) {
+  return {
+    name: 'discord',
+    userName: 'bot',
+    channelIdFromThreadId: (tid: string) => `discord:guild:${tid.replace('thread-', '')}`,
+    fetchChannelMessages: async (_channelId: string, _opts?: unknown) => ({
+      messages: msgs,
+      nextCursor: undefined,
+    }),
+    // Minimal stubs so Chat SDK initializes without error
+    initialize: async () => {},
+    postMessage: async () => ({ id: 'sent', threadId: 'thread-001', raw: {} }),
+    startTyping: async () => {},
+  } as unknown as Adapter;
+}
+
+describe('createChatSdkBridge.fetchHistory', () => {
+  beforeEach(async () => {
+    // initTestDb so SqliteStateAdapter's getDb() doesn't throw
+    const { initTestDb, runMigrations } = await import('../db/index.js');
+    const db = initTestDb();
+    runMigrations(db);
+  });
+
+  afterEach(async () => {
+    const { closeDb } = await import('../db/index.js');
+    closeDb();
+  });
+
+  async function makeBridgeWithSetup(adapter: Adapter, onInbound: ChannelSetup['onInbound']) {
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: false });
+    const setup: ChannelSetup = {
+      onInbound,
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    };
+    await bridge.setup(setup);
+    return bridge;
+  }
+
+  it('is undefined when the adapter has no fetchChannelMessages', async () => {
+    const adapter = { name: 'no-fetch', initialize: async () => {} } as unknown as Adapter;
+    const bridge = await makeBridgeWithSetup(adapter, async () => {});
+    expect(bridge.fetchHistory).toBeUndefined();
+  });
+
+  it('is defined when the adapter has fetchChannelMessages', async () => {
+    const adapter = fetchableAdapter([]);
+    const bridge = await makeBridgeWithSetup(adapter, async () => {});
+    expect(bridge.fetchHistory).toBeDefined();
+  });
+
+  it('(d) bootstrap: null sinceMessageId returns latest id without replaying', async () => {
+    const msgs = [fakeMessage('msg-001'), fakeMessage('msg-002'), fakeMessage('msg-003')];
+    const inboundCalls: string[] = [];
+    const bridge = await makeBridgeWithSetup(fetchableAdapter(msgs), async (_cid, _tid, msg: InboundMessage) => {
+      inboundCalls.push(msg.id);
+    });
+
+    const result = await bridge.fetchHistory!('discord:guild:chan', null, 10, false);
+    expect(result.latestMessageId).toBe('msg-003');
+    expect(inboundCalls).toHaveLength(0); // no replay during bootstrap
+  });
+
+  it('(a) replays only messages after the cursor id', async () => {
+    const msgs = [fakeMessage('msg-001'), fakeMessage('msg-002'), fakeMessage('msg-003'), fakeMessage('msg-004')];
+    const inboundCalls: string[] = [];
+    const bridge = await makeBridgeWithSetup(fetchableAdapter(msgs), async (_cid, _tid, msg: InboundMessage) => {
+      inboundCalls.push(msg.id);
+    });
+
+    const result = await bridge.fetchHistory!('discord:guild:chan', 'msg-002', 10, false);
+    // Only msg-003 and msg-004 are after the cursor
+    expect(inboundCalls).toEqual(['msg-003', 'msg-004']);
+    expect(result.latestMessageId).toBe('msg-004');
+  });
+
+  it('(c) replays in chronological order', async () => {
+    const msgs = [fakeMessage('msg-a'), fakeMessage('msg-b'), fakeMessage('msg-c')];
+    const order: string[] = [];
+    const bridge = await makeBridgeWithSetup(fetchableAdapter(msgs), async (_cid, _tid, msg: InboundMessage) => {
+      order.push(msg.id);
+    });
+
+    await bridge.fetchHistory!('discord:guild:chan', 'msg-a', 10, false);
+    expect(order).toEqual(['msg-b', 'msg-c']);
+  });
+
+  it('(b) replays full page and warns when cursor is not in the page', async () => {
+    const msgs = [fakeMessage('msg-new-1'), fakeMessage('msg-new-2')];
+    const inboundCalls: string[] = [];
+    const bridge = await makeBridgeWithSetup(fetchableAdapter(msgs), async (_cid, _tid, msg: InboundMessage) => {
+      inboundCalls.push(msg.id);
+    });
+
+    // 'msg-old' is not in the page (represents a deleted or too-old message)
+    const result = await bridge.fetchHistory!('discord:guild:chan', 'msg-old', 10, false);
+    expect(inboundCalls).toEqual(['msg-new-1', 'msg-new-2']);
+    expect(result.latestMessageId).toBe('msg-new-2');
+  });
+
+  it('returns null latestMessageId when the channel has no messages', async () => {
+    const bridge = await makeBridgeWithSetup(fetchableAdapter([]), async () => {});
+    const result = await bridge.fetchHistory!('discord:guild:chan', null, 10, false);
+    expect(result.latestMessageId).toBeNull();
+  });
+
+  it('forwards isGroup flag through messageToInbound so the router gets it', async () => {
+    const msgs = [fakeMessage('msg-001')];
+    let capturedMsg: InboundMessage | null = null;
+    const bridge = await makeBridgeWithSetup(fetchableAdapter(msgs), async (_cid, _tid, msg: InboundMessage) => {
+      capturedMsg = msg;
+    });
+
+    await bridge.fetchHistory!('discord:guild:chan', null, 10, true); // bootstrap, no replay
+    expect(capturedMsg).toBeNull(); // bootstrap never replays
+
+    await bridge.fetchHistory!('discord:guild:chan', 'cursor-before', 10, true);
+    // cursor not in page → replays all
+    expect(capturedMsg).not.toBeNull();
+    expect(capturedMsg!.isGroup).toBe(true);
   });
 });
 

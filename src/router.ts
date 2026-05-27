@@ -25,6 +25,7 @@ import {
   createMessagingGroup,
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
+  setMessagingGroupLastSeen,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
@@ -204,6 +205,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     mg = found.mg;
     agentCount = found.agentCount;
   }
+
+  // Advance the per-channel catch-up cursor for every chat-sdk message so
+  // the next startup knows where to start replaying from. Done before the
+  // agentCount-0 drop check so even plain chatter on unwired channels moves
+  // the cursor forward (we've seen it; no need to replay it next restart).
+  if (event.message.kind === 'chat-sdk') setMessagingGroupLastSeen(mg.id, event.message.id);
 
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
   //     escalate to owner for channel-registration approval.

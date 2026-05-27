@@ -114,6 +114,11 @@ export function setMessagingGroupDeniedAt(id: string, deniedAt: string | null): 
   getDb().prepare('UPDATE messaging_groups SET denied_at = ? WHERE id = ?').run(deniedAt, id);
 }
 
+/** Advance the per-channel catch-up cursor to the given platform message id. */
+export function setMessagingGroupLastSeen(id: string, messageId: string | null): void {
+  getDb().prepare('UPDATE messaging_groups SET last_seen_message_id = ? WHERE id = ?').run(messageId, id);
+}
+
 // ── Messaging Group Agents ──
 
 /**

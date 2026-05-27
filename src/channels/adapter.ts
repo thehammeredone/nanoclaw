@@ -164,6 +164,27 @@ export interface ChannelAdapter {
    * Returning the same platform_id on repeated calls is expected.
    */
   openDM?(userHandle: string): Promise<string>;
+
+  /**
+   * Fetch recent channel history and replay messages missed during downtime.
+   *
+   * Fetches the most recent `limit` messages from the platform (a single
+   * backward page), replays those newer than `sinceMessageId` through the
+   * host's `onInbound` funnel, and returns the newest message id seen.
+   *
+   * When `sinceMessageId` is null (first-deploy bootstrap): do NOT replay —
+   * just return the channel's newest message id so the caller can set an
+   * anchor for future catch-up runs.
+   *
+   * Channels that cannot fetch history (Signal, DeltaChat) omit this method;
+   * the catch-up routine skips them silently.
+   */
+  fetchHistory?(
+    platformId: string,
+    sinceMessageId: string | null,
+    limit: number,
+    isGroup: boolean,
+  ): Promise<{ latestMessageId: string | null }>;
 }
 
 /** Factory function that creates a channel adapter (returns null if credentials missing). */
