@@ -1,9 +1,11 @@
 ---
 id: TASK-1
 title: Create Aurora agent group scaffold and setup script
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-06-24 03:47'
+updated_date: '2026-06-24 03:49'
 labels:
   - setup
   - skylight
