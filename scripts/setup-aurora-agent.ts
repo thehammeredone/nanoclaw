@@ -33,11 +33,24 @@ const SKYLIGHT_MCP_CONFIG = {
     command: 'bash',
     args: [
       '-lc',
-      'cd /home/hammer/git/Skylight && source ~/.config/skylight/config.env 2>/dev/null; source ~/.config/skylight/token.env 2>/dev/null; exec uv run python -m server',
+      'source ~/.config/skylight/config.env 2>/dev/null; source ~/.config/skylight/token.env 2>/dev/null; cd /opt/skylight && exec .venv/bin/python -m server',
     ],
     env: {},
   },
 };
+
+const SKYLIGHT_MOUNTS = [
+  {
+    hostPath: '/home/hammer/git/Skylight',
+    containerPath: '/opt/skylight',
+    readonly: true,
+  },
+  {
+    hostPath: '/home/hammer/.config/skylight',
+    containerPath: '/home/node/.config/skylight',
+    readonly: true,
+  },
+];
 
 const PLACEHOLDER_INSTRUCTIONS =
   '# Aurora\n\nYou are Aurora, a morning briefing assistant for Hammer. Full instructions coming in Task 2.\n';
@@ -73,14 +86,18 @@ function main(): void {
   // 3. Ensure container config row exists, then set the Skylight MCP server.
   //    ensureContainerConfig is idempotent (INSERT OR IGNORE).
   ensureContainerConfig(ag.id);
+  updateContainerConfigJson(ag.id, 'additional_mounts', SKYLIGHT_MOUNTS);
   updateContainerConfigJson(ag.id, 'mcp_servers', SKYLIGHT_MCP_CONFIG);
   console.log('Skylight MCP server configured in container config.');
+  console.log('Skylight container mounts configured (repo + config dir).');
 
   console.log('');
   console.log('Aurora agent group setup complete.');
   console.log(`  agent group: ${ag.name} [${ag.id}]`);
   console.log(`  folder:      groups/${FOLDER}/`);
   console.log(`  MCP server:  skylight (bash -lc ...)`);
+  console.log(`  mounts:      /home/hammer/git/Skylight → /opt/skylight (ro)`);
+  console.log(`               /home/hammer/.config/skylight → /home/node/.config/skylight (ro)`);
   console.log('');
   console.log('Next steps:');
   console.log('  - Task 2: populate groups/skylight-morning/CLAUDE.local.md');
