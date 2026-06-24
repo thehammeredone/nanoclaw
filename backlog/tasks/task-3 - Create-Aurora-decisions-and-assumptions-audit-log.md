@@ -1,11 +1,11 @@
 ---
 id: TASK-3
 title: Create Aurora decisions and assumptions audit log
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-06-24 03:47'
-updated_date: '2026-06-24 04:16'
+updated_date: '2026-06-24 04:21'
 labels:
   - docs
   - audit
@@ -24,12 +24,34 @@ Create a backlog document recording all architectural decisions and assumptions 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Backlog doc exists titled 'Aurora (skylight-morning) — Decisions and Assumptions Audit Log'
-- [ ] #2 Documents agent name choice (Aurora) and rationale
-- [ ] #3 Documents MCP config approach (bash -lc sourcing pattern, why not env block)
-- [ ] #4 Documents token/credential approach (file-based sourcing from ~/.config/skylight/)
-- [ ] #5 Documents morning report content decisions (which tools, date windows, report format)
-- [ ] #6 Documents scheduling deferral decision (report triggered by message, daily scheduling deferred until channel attachment)
-- [ ] #7 Documents channel attachment deferral (group created but not wired to any messaging group)
-- [ ] #8 Lists all assumptions made without user input, with the research basis for each
+- [x] #1 Backlog doc exists titled 'Aurora (skylight-morning) — Decisions and Assumptions Audit Log'
+- [x] #2 Documents agent name choice (Aurora) and rationale
+- [x] #3 Documents MCP config approach (bash -lc sourcing pattern, why not env block)
+- [x] #4 Documents token/credential approach (file-based sourcing from ~/.config/skylight/)
+- [x] #5 Documents morning report content decisions (which tools, date windows, report format)
+- [x] #6 Documents scheduling deferral decision (report triggered by message, daily scheduling deferred until channel attachment)
+- [x] #7 Documents channel attachment deferral (group created but not wired to any messaging group)
+- [x] #8 Lists all assumptions made without user input, with the research basis for each
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Create backlog doc recording all 15 architectural decisions and 10 headless assumptions made during Aurora build, including credential approach, Python runtime, mount config, API sequence corrections, and scheduling/channel deferral rationale.
+<!-- SECTION:FINAL_SUMMARY:END -->
