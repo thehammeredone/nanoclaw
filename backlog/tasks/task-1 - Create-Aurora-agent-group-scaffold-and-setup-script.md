@@ -1,11 +1,11 @@
 ---
 id: TASK-1
 title: Create Aurora agent group scaffold and setup script
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-06-24 03:47'
-updated_date: '2026-06-24 03:49'
+updated_date: '2026-06-24 04:06'
 labels:
   - setup
   - skylight
@@ -23,9 +23,25 @@ Create the skylight-morning agent group in nanoclaw-v2. Aurora is a morning brie
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 scripts/setup-aurora-agent.ts exists and compiles without TypeScript errors (pnpm exec tsc --noEmit)
-- [ ] #2 Script creates agent group named 'Aurora' with folder 'skylight-morning' in the DB (idempotent — uses get-or-create pattern)
-- [ ] #3 Script configures Skylight MCP server in the container config using the bash -lc pattern: bash -lc 'source ~/.config/skylight/config.env 2>/dev/null; source ~/.config/skylight/token.env 2>/dev/null; exec uv run python -m server' with cwd /home/hammer/git/Skylight
-- [ ] #4 groups/skylight-morning/ directory exists and is committed to git
-- [ ] #5 groups/skylight-morning/CLAUDE.local.md exists (may be seeded with placeholder — full content is Task 2)
+- [x] #1 scripts/setup-aurora-agent.ts exists and compiles without TypeScript errors (pnpm exec tsc --noEmit)
+- [x] #2 Script creates agent group named 'Aurora' with folder 'skylight-morning' in the DB (idempotent — uses get-or-create pattern)
+- [x] #3 Script configures Skylight MCP server in the container config using the bash -lc pattern: bash -lc 'source ~/.config/skylight/config.env 2>/dev/null; source ~/.config/skylight/token.env 2>/dev/null; exec uv run python -m server' with cwd /home/hammer/git/Skylight
+- [x] #4 groups/skylight-morning/ directory exists and is committed to git
+- [x] #5 groups/skylight-morning/CLAUDE.local.md exists (may be seeded with placeholder — full content is Task 2)
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Add Aurora agent group (skylight-morning) with idempotent setup script. Configures Skylight MCP via Python venv from mounted repo, reads credentials at setup time into McpServerConfig.env, adds python3/pip/venv apt packages, uses relative container mount path, and updates host mount allowlist.
+<!-- SECTION:FINAL_SUMMARY:END -->
