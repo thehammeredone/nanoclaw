@@ -1,9 +1,11 @@
 ---
 id: TASK-3
 title: Create Aurora decisions and assumptions audit log
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-06-24 03:47'
+updated_date: '2026-06-24 04:16'
 labels:
   - docs
   - audit
