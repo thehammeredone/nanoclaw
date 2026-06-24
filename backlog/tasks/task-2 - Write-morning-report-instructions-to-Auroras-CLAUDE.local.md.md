@@ -1,9 +1,11 @@
 ---
 id: TASK-2
 title: Write morning report instructions to Aurora's CLAUDE.local.md
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-06-24 03:47'
+updated_date: '2026-06-24 04:06'
 labels:
   - content
   - skylight
