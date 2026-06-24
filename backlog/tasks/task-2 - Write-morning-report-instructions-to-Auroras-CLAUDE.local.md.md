@@ -1,11 +1,11 @@
 ---
 id: TASK-2
 title: Write morning report instructions to Aurora's CLAUDE.local.md
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-06-24 03:47'
-updated_date: '2026-06-24 04:06'
+updated_date: '2026-06-24 04:16'
 labels:
   - content
   - skylight
@@ -24,10 +24,28 @@ Write complete per-group instructions for Aurora in groups/skylight-morning/CLAU
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 CLAUDE.local.md opens with Aurora's identity and purpose as a morning briefing assistant
-- [ ] #2 Contains a Morning Report section that defines the report format and data sources
-- [ ] #3 Specifies the correct API call sequence: list_calendar_events (date_min=today, date_max=today), list_chores (after=yesterday, before=tomorrow, include_late=true), get_reward_points
-- [ ] #4 Includes guidance on handling 401 errors (token expired — user must re-run capture_token_cli.py)
-- [ ] #5 Specifies report output format with sections for events, chores, and reward points
-- [ ] #6 Includes instructions for how to trigger the report (respond to any message asking for the morning report, daily briefing, or similar)
+- [x] #1 CLAUDE.local.md opens with Aurora's identity and purpose as a morning briefing assistant
+- [x] #2 Contains a Morning Report section that defines the report format and data sources
+- [x] #3 Specifies the correct API call sequence: list_calendar_events (date_min=today, date_max=today), list_chores (after=yesterday, before=tomorrow, include_late=true), get_reward_points
+- [x] #4 Includes guidance on handling 401 errors (token expired — user must re-run capture_token_cli.py)
+- [x] #5 Specifies report output format with sections for events, chores, and reward points
+- [x] #6 Includes instructions for how to trigger the report (respond to any message asking for the morning report, daily briefing, or similar)
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Write complete Aurora morning report instructions in CLAUDE.local.md. Covers identity, API sequence (list_calendar_events/list_chores/list_categories/get_reward_points with correct params), category label lookup for reward point names, write-tool guard, 401 handling, output format, and memory agent integration.
+<!-- SECTION:FINAL_SUMMARY:END -->
