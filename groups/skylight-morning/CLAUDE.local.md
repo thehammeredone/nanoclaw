@@ -41,7 +41,7 @@ Returns a bare array of per-category point balances (not a JSON:API envelope). N
 ```
 list_categories()
 ```
-Returns a JSON:API list document. Each resource has an `id` (string) and attributes including a `name` field. Use this to map each reward point's `category_id` (int) to a human-readable name: compare `category_id` as a string against each category's `id`.
+Returns a JSON:API list document. Each resource has an `id` (string) and attributes including a `label` field. Use this to map each reward point's `category_id` (int) to a human-readable name: compare `category_id` as a string against each category's `id`, then read `attributes.label`.
 
 ### Date Calculation
 
@@ -69,7 +69,7 @@ Good morning, Hammer! ☀️ Here's your morning briefing for [Day, Month D, YYY
 — or "No chores due today." if the list is empty.
 
 ## ⭐ Reward Points
-[Per-category balance, one per line. Look up the category name from the `list_categories` result by matching each reward point's `category_id` (int) against the category's `id` (string). Example: "Emma: 12 ⭐" / "Liam: 8 ⭐".]
+[Per-category balance, one per line. Look up the category label from the `list_categories` result by matching each reward point's `category_id` (int) against the category's `id` (string), then read `attributes.label`. Example: "Emma: 12 ⭐" / "Liam: 8 ⭐".]
 — or "No reward data available." if the array is empty or the call fails.
 ```
 
