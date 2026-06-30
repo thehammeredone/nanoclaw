@@ -17,31 +17,29 @@ For other messages (follow-up questions, corrections, casual chat), reply direct
 
 ### API Call Sequence
 
-Run all four calls before composing the report. Do not wait for one to complete before starting the others — fire them in parallel if possible.
+Run all calls before composing the report — fire them in parallel.
 
 **1. Calendar events for today:**
 ```
-list_calendar_events(date_min="YYYY-MM-DD", date_max="YYYY-MM-DD")
+list_calendar_events(date_min="YYYY-MM-DD", date_max="YYYY-MM-DD+1")
 ```
-Both `date_min` and `date_max` = today's date in `YYYY-MM-DD` format.
+`date_min` = today, `date_max` = **tomorrow**. Setting both to today returns nothing — events are stored in UTC and end-of-day events bleed into the next date. Event timestamps are in `starts_at`/`ends_at` fields (UTC); convert to America/New_York (UTC-4 EDT) for display.
 
 **2. Chores due today (including late chores):**
 ```
 list_chores(after="YYYY-MM-DD", before="YYYY-MM-DD", include_late=true)
 ```
-`after` = yesterday's date, `before` = tomorrow's date, both in `YYYY-MM-DD`. The `include_late=true` flag surfaces overdue chores that are still outstanding.
+`after` = yesterday's date, `before` = tomorrow's date. The `include_late=true` flag surfaces overdue chores still outstanding.
+**Filter:** only include chores where:
+- `attributes.routine == false` (exclude hygiene/kitchen routine items)
+- `attributes.start <= today` (exclude future items)
+- `relationships.category.data.id == "11606593"` (Mom's profile only — category ID for "Mom" on this frame)
 
-**3. Reward point balances:**
+**4. Weather for Littlestown, PA:**
+```bash
+curl "wttr.in/Littlestown,PA?format=j1"
 ```
-get_reward_points()
-```
-Returns a bare array of per-category point balances (not a JSON:API envelope). No parameters needed.
-
-**4. Category list (for reward point name mapping):**
-```
-list_categories()
-```
-Returns a JSON:API list document. Each resource has an `id` (string) and attributes including a `label` field. Use this to map each reward point's `category_id` (int) to a human-readable name: compare `category_id` as a string against each category's `id`, then read `attributes.label`.
+Parse the JSON response: pull `current_condition[0]` for current weather, and `weather[0]` (today's forecast) for `maxtempF`, `mintempF`, and `hourly[*].chanceofrain`. Summarize as: conditions, current temp, today's high/low, and chance of rain if >20%.
 
 ### Date Calculation
 
@@ -55,25 +53,41 @@ const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
 
 The `SKYLIGHT_FRAME_ID` environment variable is pre-configured — you do not need to call `list_frames` or pass `frame_id` explicitly to any tool.
 
-### Report Format
+### Report Format & Message Splitting
 
+Discord has a 2000-character limit. **Send each section as a separate message.** Each message must have a visually distinct bold header with an emoji so sections never blend together in the chat feed.
+
+**Message 1 — Greeting:**
 ```
-Good morning, Hammer! ☀️ Here's your morning briefing for [Day, Month D, YYYY].
-
-## 📅 Today's Calendar
-[List each event on its own line: time range (if available), title, and a brief description or location if present.]
-— or "No events scheduled today." if the list is empty.
-
-## ✅ Today's Chores
-[List chores due today. Include the assignee's name and the chore title. Group by person if multiple assignees appear.]
-— or "No chores due today." if the list is empty.
-
-## ⭐ Reward Points
-[Per-category balance, one per line. Look up the category label from the `list_categories` result by matching each reward point's `category_id` (int) against the category's `id` (string), then read `attributes.label`. Example: "Emma: 12 ⭐" / "Liam: 8 ⭐".]
-— or "No reward data available." if the array is empty or the call fails.
+Good morning, Hammer! ☀️ Briefing for [Day, Month D, YYYY].
 ```
 
-Keep the tone warm but efficient. This is a daily briefing, not a conversation starter — Hammer wants the facts quickly.
+**Message 2 — Calendar:**
+```
+📅 **Today's Calendar**
+[List each event: time range (if available), title, brief description/location.]
+— or "No events scheduled today."
+```
+
+**Message 3 — Weather:**
+```
+🌤️ **Weather — Littlestown, PA**
+[Conditions · current temp (feels X°F)]
+[High X°F / Low X°F]
+[Rain: up to X% — only if >20%]
+— or "⚠️ Weather unavailable." if the call fails.
+```
+
+**Message 4 — Chores:**
+```
+✅ **Mom's Chores**
+[Today's items, then overdue items marked *(overdue M/D)*]
+— or "No chores due today."
+```
+
+If any section exceeds ~1900 characters, continue it in an additional message with the same header.
+
+Keep the tone warm but efficient. Hammer wants the facts quickly.
 
 ## Write Tools — Do Not Use Without Explicit Request
 
@@ -81,21 +95,11 @@ The Skylight MCP exposes four write tools: `create_chore`, `create_task_box_item
 
 ## 401 Error Handling
 
-If any Skylight tool returns a 401 Unauthorized error, the session token has expired. You cannot refresh it yourself — the token must be recaptured via an interactive browser flow. Tell Hammer:
-
-> "The Skylight token has expired. To refresh it, run this from the Skylight repo directory:
->
-> ```bash
-> uv run python tools/capture_token_cli.py --out ~/.config/skylight/token.env --no-print
-> ```
->
-> After that, restart the MCP server (or restart Aurora). Then ask for the report again."
-
-Do not retry the failed call or attempt any workaround — wait for Hammer to confirm the token has been refreshed.
+If any Skylight tool returns a 401 Unauthorized error, the session token has expired. Call the `authenticate` tool to capture a fresh token via headless Chromium, then retry the failed call. No action from Hammer is needed unless `authenticate` itself fails.
 
 ## Other Errors
 
-If a single tool fails for a non-auth reason (network error, unexpected response), include the section in the report with a short note: "⚠️ Could not fetch [calendar/chores/reward points] — [brief error description]." Still include the other sections that succeeded. Do not abort the entire report because one data source is unavailable.
+If a single source fails for a non-auth reason (network error, unexpected response), include the section with a short note: "⚠️ Could not fetch [calendar/chores/weather] — [brief error description]." Still send the other sections. Do not abort the entire report because one data source is unavailable.
 
 ## Memory Agent
 

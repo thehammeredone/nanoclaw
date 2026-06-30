@@ -2,8 +2,8 @@
  * Set up the Aurora agent group (skylight-morning) in the central DB.
  *
  * Aurora is a morning briefing assistant powered by the Skylight MCP server.
- * The Skylight MCP token is at ~/.config/skylight/token.env and config.env
- * (SKYLIGHT_FRAME_ID=3964300, SKYLIGHT_AUTH_SCHEME=bearer).
+ * Credentials (email + password) come from ~/.config/skylight/credentials.env;
+ * the token is never a static env var — Aurora calls `authenticate` on 401.
  *
  * Idempotent — safe to run multiple times. Logs "Created" vs "Reusing" for
  * the agent group row.
@@ -32,38 +32,36 @@ function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function readSkylightEnv(): { token: string; authScheme: string; frameId: string } {
+function readSkylightEnv(): { email: string; password: string; frameId: string } {
   const configPath = path.join(os.homedir(), '.config', 'skylight', 'config.env');
-  const tokenPath = path.join(os.homedir(), '.config', 'skylight', 'token.env');
+  const credsPath = path.join(os.homedir(), '.config', 'skylight', 'credentials.env');
 
+  let email = '';
+  let password = '';
   let frameId = '';
-  let token = '';
-  let authScheme = 'bearer';
 
-  const parseEnvFile = (filePath: string) => {
-    if (!fs.existsSync(filePath)) return;
-    for (const line of fs.readFileSync(filePath, 'utf8').split('\n')) {
-      const m = line.match(/^export\s+(\w+)=['"]?([^'"]+)['"]?\s*$/);
-      if (!m) continue;
-      if (m[1] === 'SKYLIGHT_TOKEN') token = m[2];
-      if (m[1] === 'SKYLIGHT_FRAME_ID') frameId = m[2];
-      if (m[1] === 'SKYLIGHT_AUTH_SCHEME') authScheme = m[2];
-    }
-  };
+  function parseEnvFile(filePath: string) {
+    try {
+      for (const line of fs.readFileSync(filePath, 'utf-8').split('\n')) {
+        const m = line.match(/^export\s+(\w+)=(.*)$/);
+        if (!m) continue;
+        const val = m[2].replace(/^['"]|['"]$/g, '').trim();
+        if (m[1] === 'SKYLIGHT_EMAIL') email = val;
+        if (m[1] === 'SKYLIGHT_PASSWORD') password = val;
+        if (m[1] === 'SKYLIGHT_FRAME_ID') frameId = val;
+      }
+    } catch { /* ignore missing */ }
+  }
 
   parseEnvFile(configPath);
-  parseEnvFile(tokenPath); // token.env wins (last write wins)
+  parseEnvFile(credsPath);
 
-  if (!token)
-    throw new Error(
-      'SKYLIGHT_TOKEN not found in ~/.config/skylight/token.env. Run the Skylight capture tool first.',
-    );
+  if (!email || !password)
+    throw new Error('SKYLIGHT_EMAIL/SKYLIGHT_PASSWORD not found in ~/.config/skylight/credentials.env');
   if (!frameId)
-    throw new Error(
-      'SKYLIGHT_FRAME_ID not found. Re-run capture with auto-detect or set it manually in ~/.config/skylight/config.env.',
-    );
+    throw new Error('SKYLIGHT_FRAME_ID not found in ~/.config/skylight/config.env');
 
-  return { token, authScheme, frameId };
+  return { email, password, frameId };
 }
 
 function ensureSkylightMountAllowlisted(): void {
@@ -104,8 +102,8 @@ function main(): void {
   runMigrations(db); // idempotent
 
   // Read Skylight credentials from host filesystem before any DB work.
-  const { token, authScheme, frameId } = readSkylightEnv();
-  console.log(`Skylight token loaded (frame: ${frameId}, scheme: ${authScheme})`);
+  const { email, password, frameId } = readSkylightEnv();
+  console.log(`Skylight credentials loaded (frame: ${frameId})`);
 
   // Ensure the Skylight repo is in the mount allowlist.
   ensureSkylightMountAllowlisted();
@@ -143,6 +141,7 @@ function main(): void {
   console.log('python3 + python3-pip + python3-venv added to packages_apt.');
 
   // 3b. Mount the Skylight repo (relative containerPath → /workspace/extra/skylight).
+  //     No skylight-config mount — credentials come via env vars, token cached in /workspace.
   updateContainerConfigJson(ag.id, 'additional_mounts', [
     {
       hostPath: SKYLIGHT_REPO,
@@ -152,29 +151,38 @@ function main(): void {
   ]);
   console.log('Skylight repo mount configured (relative path: skylight).');
 
-  // 3c. MCP server: install wheel into a venv cached under /workspace, then run.
-  //     Token injected as env vars — no credential file mount.
+  // 3c. MCP server: install wheel into a versioned venv, pass credentials as env vars.
+  //     Token is never a static env var — Aurora calls `authenticate` on 401.
   updateContainerConfigJson(ag.id, 'mcp_servers', {
     skylight: {
       command: 'bash',
       args: [
         '-lc',
-        '[ -d /workspace/.skylight-env ] || (python3 -m venv /workspace/.skylight-env && /workspace/.skylight-env/bin/pip install -q /workspace/extra/skylight/dist/skylight-0.2.0-py3-none-any.whl); cd /workspace/extra/skylight && exec /workspace/.skylight-env/bin/python -m server',
+        [
+          '[ -d /workspace/.skylight-venv-0.2.1 ] ||',
+          '  (python3 -m venv /workspace/.skylight-venv-0.2.1 &&',
+          '   /workspace/.skylight-venv-0.2.1/bin/pip install -q',
+          '   /workspace/extra/skylight/dist/skylight-0.2.1-py3-none-any.whl);',
+          'mkdir -p /workspace/.skylight;',
+          'cd /workspace/extra/skylight &&',
+          'exec /workspace/.skylight-venv-0.2.1/bin/python -m server',
+        ].join(' '),
       ],
       env: {
-        SKYLIGHT_TOKEN: token,
-        SKYLIGHT_AUTH_SCHEME: authScheme,
+        SKYLIGHT_EMAIL: email,
+        SKYLIGHT_PASSWORD: password,
         SKYLIGHT_FRAME_ID: frameId,
+        SKYLIGHT_TOKEN_ENV_PATH: '/workspace/.skylight/token.env',
       },
     },
   });
-  console.log('Skylight MCP server configured (python venv + env-var token).');
+  console.log('Skylight MCP server configured (python venv + email/password env vars).');
 
   console.log('');
   console.log('Aurora agent group setup complete.');
   console.log(`  agent group: ${ag.name} [${ag.id}]`);
   console.log(`  folder:      groups/${FOLDER}/`);
-  console.log(`  MCP server:  skylight (python venv, token from env)`);
+  console.log(`  MCP server:  skylight (python venv, email+password from env, token cached in /workspace)`);
   console.log(`  mount:       ${SKYLIGHT_REPO} → /workspace/extra/skylight (ro, relative)`);
   console.log('');
   console.log('Next steps:');
