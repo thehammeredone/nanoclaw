@@ -211,6 +211,14 @@ Four types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 
 Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md). It covers accepted change types, the four skill types and their guidelines, `SKILL.md` format rules, and the pre-submission checklist.
 
+## Branch Strategy (this install)
+
+**`hammer` is the local dev branch. `main` tracks the upstream fork.**
+
+- Never merge `hammer` into `main` — `main` is reserved for upstream pulls only.
+- All local work lives on `hammer`. When finishing a development branch, the correct options are push (PR) or keep as-is — not merge to `main`.
+- To bring in upstream changes: `git checkout main && git pull`, then rebase or cherry-pick onto `hammer` as needed.
+
 ## PR Hygiene
 
 Before creating a PR, run these checks:
