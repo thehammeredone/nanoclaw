@@ -87,9 +87,11 @@ git commit.)
 - **Cancel** all three recurring schedules (sessions `varxh7`, `mkfbud`, `wdbfsb`) by
   clearing their recurrence so they stop re-arming.
 - **Remove** the ai-news files from `groups/dm-with-hammer/`.
-- **Leave Mjollnir's container untouched** — the scraper packages stay in
-  `container.json`; no image rebuild. They're harmless dead weight and avoiding the
-  rebuild keeps the change lower-risk. (Decision: Hammer, 2026-07-06.)
+- **Remove the scraper-specific packages** from Mjollnir's `container.json`:
+  `python3-requests`, `python3-bs4`, `python3-feedparser`, `python3-dateutil`. **Keep the
+  bones** — `git` and base `python3` (general-purpose tooling, not scraper-specific).
+  This requires rebuilding Mjollnir's image. (Decision: Hammer, 2026-07-06 — revised from
+  the earlier "leave container untouched".)
 - Mjollnir's personality is left untouched.
 
 ### 6. Memory touch-up (light)
@@ -102,8 +104,9 @@ git commit.)
 1. Rebuild Radar's image; first spawn with `--rebuild` (Aurora gotcha: new dedicated
    agents need a rebuild before first use).
 2. Manually trigger one digest run and confirm chunks post to `#ai-news`.
-3. Confirm Mjollnir: no ai-news files, all three schedules no longer re-arm, and
-   Mjollnir no longer answers `#ai-news`. (Container packages intentionally left in place.)
+3. Confirm Mjollnir: no ai-news files; `container.json` packages reduced to `git` (base
+   `python3` retained implicitly); image rebuilt; all three schedules no longer re-arm;
+   and Mjollnir no longer answers `#ai-news`.
 4. Confirm no digests land in Hammer's DM or the `assistant` channel after cutover.
 
 ## Out of scope
@@ -115,5 +118,5 @@ git commit.)
 ## Rollback
 
 The change is reversible: re-point the ai-news wiring back to Mjollnir, move the files
-back, and re-arm one schedule (Mjollnir's `container.json` never changed). Radar can be
-deleted via `ncl groups delete` if abandoned.
+back, re-add the four scraper packages to Mjollnir and rebuild, and re-arm one schedule.
+Radar can be deleted via `ncl groups delete` if abandoned.

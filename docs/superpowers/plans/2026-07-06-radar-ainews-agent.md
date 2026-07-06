@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - `groups/` is **gitignored** — all file moves and personality writes under `groups/` are operational, **no git commits** for them. Only `docs/superpowers/**` is committed.
-- **Do not touch Mjollnir's `container.json`** — scraper packages stay in place, no Mjollnir image rebuild. (Decision: Hammer, 2026-07-06.)
+- **Mjollnir keeps only `git`** in `container.json` apt packages — remove the four scraper-specific libs (`python3-requests`, `python3-bs4`, `python3-feedparser`, `python3-dateutil`); base `python3` is in the image regardless. This requires a Mjollnir image rebuild (Task 6). (Decision: Hammer, 2026-07-06.)
 - New agents need `--rebuild` before first use (Aurora gotcha).
 - Session DBs: host is the sole writer of `inbound.db`; the container only reads it. Editing Mjollnir/Radar `inbound.db` via `q.ts` from the host is architecturally valid. If a write returns `SQLITE_BUSY`, retry (host-sweep runs every 60s and briefly holds the file).
 - The digest generator runs the scraper internally: one command `python3 /workspace/agent/ai-news-digest.py` scrapes + writes `digest-discord.json` (array of Discord-sized chunks) + `digest-latest.md`, and dedups via `digest-seen-urls.json`. Known-good invocation sets the onecli CA bundle: `REQUESTS_CA_BUNDLE=/tmp/onecli-combined-ca.pem`.
@@ -317,7 +317,57 @@ Expected: prints only `check complete` (no `STILL ARMED` lines).
 
 ---
 
-### Task 6: Memory touch-up (light)
+### Task 6: Remove scraper-specific packages from Mjollnir + rebuild
+
+**Files:**
+- Modify (DB): `data/v2.db` — Mjollnir `container_configs.packages_apt`
+- Rebuild: Mjollnir agent image (`ag-1779381936325-6ki38t`)
+
+This task restarts Mjollnir's container, so it is gated separately from the schedule
+cancellation. Do it **after** Task 5 so the schedules are already dead before the rebuild.
+
+- [ ] **Step 1: Confirm Mjollnir's current packages**
+
+```bash
+ncl groups config get --id ag-1779381936325-6ki38t
+```
+
+Expected: `packages_apt` = `python3-requests`, `python3-bs4`, `python3-feedparser`, `python3-dateutil`, `git`.
+
+- [ ] **Step 2: Remove the four scraper-specific libs (keep `git`)**
+
+```bash
+ncl groups config remove-package --id ag-1779381936325-6ki38t --apt python3-requests
+ncl groups config remove-package --id ag-1779381936325-6ki38t --apt python3-bs4
+ncl groups config remove-package --id ag-1779381936325-6ki38t --apt python3-feedparser
+ncl groups config remove-package --id ag-1779381936325-6ki38t --apt python3-dateutil
+```
+
+Expected: each confirms removal. Do **not** remove `git`.
+
+- [ ] **Step 3: Verify only `git` remains**
+
+```bash
+ncl groups config get --id ag-1779381936325-6ki38t
+```
+
+Expected: `packages_apt` = `["git"]`.
+
+- [ ] **Step 4: Rebuild Mjollnir's image so the change takes effect**
+
+```bash
+ncl groups restart --id ag-1779381936325-6ki38t --rebuild
+```
+
+Expected: image rebuild runs. Without `--message`, Mjollnir's container stops after
+rebuild and respawns on the next DM — that's fine; no on-wake action is needed. Mjollnir's
+personality and workspace are otherwise untouched.
+
+- [ ] **Step 5: Commit** — none (DB + image, not tracked in git). Skip.
+
+---
+
+### Task 7: Memory touch-up (light)
 
 **Files:**
 - Modify: `groups/memory/wiki/log.md` (annotate the two ai-news query-log lines)
@@ -346,7 +396,7 @@ Expected: two lines now carry the `superseded ... Radar` annotation.
 
 ---
 
-### Task 7: Final end-to-end verification
+### Task 8: Final end-to-end verification
 
 **Files:** none (read-only checks).
 
@@ -375,9 +425,11 @@ for SID in $(ls data/v2-sessions/<RADAR_ID>/ 2>/dev/null); do
 done
 echo "--- Mjollnir ai-news files (expect none) ---"
 ls groups/dm-with-hammer/ | grep -E 'ai-news|digest' || echo "clean"
+echo "--- Mjollnir packages (expect only git) ---"
+ncl groups config get --id ag-1779381936325-6ki38t | grep -i packages_apt
 ```
 
-Expected: Radar shows one `0 6 * * *` row; Mjollnir prints `clean`.
+Expected: Radar shows one `0 6 * * *` row; Mjollnir prints `clean` for files; Mjollnir `packages_apt` is `["git"]`.
 
 - [ ] **Step 4: Cutover confirmation (manual)**
 
@@ -394,6 +446,6 @@ git commit -m "docs(plan): mark Radar ai-news agent plan complete"
 
 ## Self-review notes
 
-- **Spec coverage:** New agent (T1–T2), digest→#ai-news only (T3 rewire + T4 schedule), 6am ET single schedule (T4), strip files (T2) + cancel 3 schedules (T5), Mjollnir container untouched (Global Constraints, no task modifies it), memory touch-up (T6), verification incl. no-DM/assistant-digest (T7). All spec sections mapped.
+- **Spec coverage:** New agent (T1–T2), digest→#ai-news only (T3 rewire + T4 schedule), 6am ET single schedule (T4), strip files (T2) + cancel 3 schedules (T5), remove scraper packages from Mjollnir keeping git + rebuild (T6), memory touch-up (T7), verification incl. no-DM/assistant-digest + Mjollnir packages (T8). All spec sections mapped.
 - **No placeholders:** `<RADAR_ID>` is an explicitly-captured runtime value (Task 1), not a placeholder for undecided content. All file contents and SQL are literal.
-- **Reversibility:** re-point wiring to Mjollnir, `mv` files back, re-arm one schedule; Mjollnir's `container.json` never changed.
+- **Reversibility:** re-point wiring to Mjollnir, `mv` files back, re-add the four scraper packages to Mjollnir and rebuild, re-arm one schedule.
