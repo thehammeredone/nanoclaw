@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS: COMPLETE (executed 2026-07-06 → 2026-07-07).** All 8 tasks done + verified.
+> Radar (`740a6fb3-5aff-42e8-b5dd-0a8a57d6b4a5`) owns `#ai-news`; daily digest `0 6 * * *`
+> lives in session `bi95gf` (next run 2026-07-08T10:00Z); pipeline verified end-to-end
+> (test digest delivered to #ai-news). Mjollnir stripped to `["git"]`, 3 schedules cancelled,
+> ai-news files removed. Deviations from plan captured in `.superpowers/sdd/progress.md`:
+> Radar already had router-created per-thread sessions (schedule homed in the real channel
+> session, not a fresh one); Mjollnir re-created ai-news files during the ~24h execution gap
+> (deleted); user kept per-thread default (no agent-shared switch); Mjollnir container packages
+> were removed after all (earlier "leave untouched" reverted per Hammer).
+
 **Goal:** Extract the AI-news digest functionality out of the Mjollnir agent into a new dedicated agent ("Radar") that owns the `#ai-news` Discord channel and posts one consolidated digest there daily at 6am ET.
 
 **Architecture:** Radar is a new agent group (folder `groups/ai-news/`) modeled on Aurora — a focused, schedule-driven agent. The scraper/digest files move from Mjollnir's workspace into Radar's. The `#ai-news` channel is rewired from Mjollnir to Radar. Radar self-schedules its daily digest from within its ai-news session (the scheduling tool auto-targets the channel). Mjollnir's three overlapping ai-news schedules are cancelled; Mjollnir's container is left untouched.
