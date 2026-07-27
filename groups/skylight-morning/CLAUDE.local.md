@@ -21,9 +21,13 @@ Run all calls before composing the report — fire them in parallel.
 
 **1. Calendar events for today:**
 ```
-list_calendar_events(date_min="YYYY-MM-DD", date_max="YYYY-MM-DD+1")
+GET /api/frames/{frameId}/calendar_events?date_min=TODAY&date_max=TODAY+2
 ```
-`date_min` = today, `date_max` = **tomorrow**. Setting both to today returns nothing — events are stored in UTC and end-of-day events bleed into the next date. Event timestamps are in `starts_at`/`ends_at` fields (UTC); convert to America/New_York (UTC-4 EDT) for display.
+`date_min` = today, `date_max` = **two days out**. The API filters on UTC timestamps, but events are entered in America/New_York (EDT = UTC-4). An event at 11 PM EDT = 3 AM UTC the next day — so use a two-day UTC window to avoid missing late-evening events.
+
+**Critical:** after fetching, convert each event's `starts_at` (UTC) to EDT and **filter to only events whose EDT local date == today**. Discard any event whose EDT date is yesterday or tomorrow. This prevents evening events from the prior day (whose UTC time bleeds into today's UTC window) from appearing in today's report.
+
+Event title is in `attributes.summary`. Timestamps are in `starts_at`/`ends_at` (UTC ISO 8601); always display in EDT.
 
 **2. Chores due today (including late chores):**
 ```
@@ -32,14 +36,30 @@ list_chores(after="YYYY-MM-DD", before="YYYY-MM-DD", include_late=true)
 `after` = yesterday's date, `before` = tomorrow's date. The `include_late=true` flag surfaces overdue chores still outstanding.
 **Filter:** only include chores where:
 - `attributes.routine == false` (exclude hygiene/kitchen routine items)
-- `attributes.start <= today` (exclude future items)
-- `relationships.category.data.id == "11606593"` (Mom's profile only — category ID for "Mom" on this frame)
+- `attributes.start <= today` (exclude future items; chores with null/empty start are included without overdue tag)
+- `attributes.status != "completed"` (exclude completed chores)
+- `relationships.category.data.id == "11606604"` (Dad's profile only — category ID for "Dad" on this frame)
+
+Chore display name is in `attributes.summary` (not `title` or `name`).
 
 **4. Weather for Littlestown, PA:**
 ```bash
 curl "wttr.in/Littlestown,PA?format=j1"
 ```
-Parse the JSON response: pull `current_condition[0]` for current weather, and `weather[0]` (today's forecast) for `maxtempF`, `mintempF`, and `hourly[*].chanceofrain`. Summarize as: conditions, current temp, today's high/low, and chance of rain if >20%.
+Parse the JSON response:
+- `current_condition[0]`: current weather description, `temp_F`, `FeelsLikeF`
+- `weather[0]`: `maxtempF`, `mintempF`, `hourly[*]`
+
+For precipitation, iterate `weather[0].hourly` and collect every slot where `chanceofrain > 20`. Each slot's `time` is HHMM as a string (pad to 4 digits → HH:MM; convert to 12-hr for display — e.g. "0" → 12:00 AM, "600" → 6:00 AM, "1200" → 12:00 PM, "1800" → 6:00 PM). Each slot covers a 3-hour window (e.g. 6:00 AM slot = 6–9 AM).
+
+Group consecutive qualifying slots into contiguous time ranges. For each range report:
+- Time span (e.g. "9 AM – 3 PM")
+- Peak chance of rain across slots in the range (e.g. "up to 72%")
+- Total accumulated precip across slots in the range using `precipInches` (omit if sum is 0.0)
+
+Example output line: `9 AM – 3 PM: up to 72% chance, ~0.34 in`
+
+If no hourly slot has chanceofrain >20, omit the rain line entirely.
 
 ### Date Calculation
 
@@ -80,10 +100,18 @@ Good morning, Hammer! ☀️ Briefing for [Day, Month D, YYYY].
 
 **Message 4 — Chores:**
 ```
-✅ **Mom's Chores**
+✅ **Dad's Chores**
 [Today's items, then overdue items marked *(overdue M/D)*]
 — or "No chores due today."
 ```
+
+**Message 5 — Tomorrow's Calendar:**
+```
+📅 **Tomorrow's Calendar**
+[List each event: time range, title.]
+— or "Nothing on the calendar tomorrow."
+```
+Fetch tomorrow's events the same way as today's: `date_min=TOMORROW&date_max=TOMORROW+2`, then filter by EDT local date == tomorrow.
 
 If any section exceeds ~1900 characters, continue it in an additional message with the same header.
 
