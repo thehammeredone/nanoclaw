@@ -173,6 +173,10 @@ function main(): void {
         SKYLIGHT_PASSWORD: password,
         SKYLIGHT_FRAME_ID: frameId,
         SKYLIGHT_TOKEN_ENV_PATH: '/workspace/.skylight/token.env',
+        // pip doesn't honor NODE_EXTRA_CA_CERTS/SSL_CERT_FILE (those are JS/Deno-only) —
+        // without this, any dependency not already in the wheel fails cert verification
+        // against the OneCLI proxy's self-signed intercepting cert.
+        PIP_CERT: '/tmp/onecli-combined-ca.pem',
       },
     },
   });
