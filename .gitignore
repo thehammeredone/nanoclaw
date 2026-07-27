@@ -24,6 +24,7 @@ groups/*
 *.keys.json
 .env
 .env*
+matrix-credentials.local.md
 
 # Temp files
 .tmp-*
