@@ -286,6 +286,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 |-----|---------|
 | [docs/architecture.md](docs/architecture.md) | Full architecture writeup |
 | [docs/api-details.md](docs/api-details.md) | Host API + DB schema details |
+| [docs/state-discovery.md](docs/state-discovery.md) | How to inventory this install — query recipes for volatile state, recorded data for stable structure (FK behavior, teardown order, where group state lives) |
 | [docs/db.md](docs/db.md) | DB architecture overview: three-DB model, cross-mount rules, readers/writers map |
 | [docs/db-central.md](docs/db-central.md) | Central DB (`data/v2.db`) — every table + migration system |
 | [docs/db-session.md](docs/db-session.md) | Per-session `inbound.db` + `outbound.db` schemas + seq parity |
