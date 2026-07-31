@@ -28,6 +28,7 @@ matrix-credentials.local.md
 
 # Temp files
 .tmp-*
+*.swp
 
 # OS
 .DS_Store
@@ -38,5 +39,8 @@ matrix-credentials.local.md
 
 # Skills system (local per-installation state)
 .nanoclaw/
+.superpowers/
+# written relative to cwd, so it can land in any directory
+**/.claude/statusline.json
 
 agents-sdk-docs
