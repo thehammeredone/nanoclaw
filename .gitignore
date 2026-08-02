@@ -11,12 +11,26 @@ store/
 data/
 logs/
 
-# Groups - per-installation state, not tracked
-groups/*
+# Groups - per-installation state.
+#
+# LOCAL DIVERGENCE FROM UPSTREAM: upstream ignores groups/* wholesale and bans
+# CLAUDE.local.md outright. This install tracks the per-group source of truth
+# (CLAUDE.local.md, helper scripts, wiki/plans) so agent procedures live in a
+# reviewable, revertible file instead of only inside frozen scheduled-task
+# prompts. Never include these paths in an upstream PR.
+#   CLAUDE.md    - composed at spawn by src/claude-md-compose.ts
+#   container.json - inlines plaintext credentials, never commit
+groups/*/CLAUDE.md
+groups/*/container.json
+groups/*/conversations/
+groups/*/.claude/
 
-# Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
-# per-group memory (CLAUDE.local.md) must never be committed.
-**/CLAUDE.local.md
+# Radar's scraper: a shallow clone whose data/*.json churn on every run.
+# The one local source change is vendored as groups/ai-news/ai-news-radar.patch.
+groups/ai-news/ai-news-radar/
+groups/ai-news/digest-*
+
+# Composer-managed artifacts (regenerated every spawn)
 **/.claude-shared.md
 **/.claude-fragments/
 
