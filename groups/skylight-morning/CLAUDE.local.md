@@ -21,13 +21,13 @@ For other messages (follow-up questions, corrections, casual chat), reply direct
 
 **Step 2 — Fire the remaining calls in parallel** (after authenticate completes):
 
-**Calendar events for today:**
+**1. Calendar events for today:**
 ```
-list_calendar_events(date_min=TODAY, date_max=TODAY+2)
+list_calendar_events(date_min=TODAY, date_max=TODAY+1)
 ```
-`date_min` = today, `date_max` = **two days out**. The API filters on UTC timestamps, but events are entered in America/New_York (EDT = UTC-4). An event at 11 PM EDT = 3 AM UTC the next day — so use a two-day UTC window to avoid missing late-evening events.
+`date_min` = today, `date_max` = **one day out**. The API filters on UTC timestamps, but events are entered in America/New_York (EDT = UTC-4). An 11 PM EDT event starts at 3 AM UTC the next day — a +1 day window is sufficient to catch all same-day EDT events.
 
-**Critical:** after fetching, convert each event's `starts_at` (UTC) to EDT and **filter to only events whose EDT local date == today**. Discard any event whose EDT date is yesterday or tomorrow. This prevents evening events from the prior day (whose UTC time bleeds into today's UTC window) from appearing in today's report.
+**Critical:** after fetching, convert each event's `starts_at` (UTC) to EDT and **filter to only events whose EDT local date == today**. Discard any event whose EDT date is yesterday *or* tomorrow — the window bleeds at **both** ends. A 9 PM EDT event yesterday is 01:00 UTC today and will come back in this query; drop it. Likewise drop tomorrow's early-UTC events.
 
 Event title is in `attributes.summary`. Timestamps are in `starts_at`/`ends_at` (UTC ISO 8601); always display in EDT.
 
@@ -45,6 +45,12 @@ list_chores(after="YYYY-MM-DD", before="YYYY-MM-DD", include_late=true)
 - `relationships.category.data.id == "11606604"` (Dad's profile only — category ID for "Dad" on this frame)
 
 Chore display name is in `attributes.summary` (not `title` or `name`).
+
+**3. Calendar events for tomorrow:**
+```
+list_calendar_events(date_min=TOMORROW, date_max=TOMORROW+1)
+```
+Same window logic and the same both-ends EDT filter as step 1, shifted one day: keep only events whose **EDT local date == tomorrow**, discarding today's late-UTC bleed and the day-after's early-UTC bleed. This feeds the "Tomorrow's Calendar" section — it is a separate call, not a re-slice of step 1's results.
 
 **4. Weather for Littlestown, PA:**
 ```bash
@@ -67,13 +73,21 @@ If no hourly slot has chanceofrain >20, omit the rain line entirely.
 
 ### Date Calculation
 
-Compute today's date at report generation time. Never hardcode dates. Use the system date or reason from the current timestamp:
+Compute today's date at report generation time. Never hardcode dates.
+
+**"Today" means today in America/New_York, not UTC.** Do not use `toISOString()` to derive the date — it returns the UTC day, which is already tomorrow for anything after 8 PM EDT:
 
 ```javascript
-const today = new Date().toISOString().slice(0, 10);          // YYYY-MM-DD
-const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+const fmt = (d) => new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York',            // en-CA renders YYYY-MM-DD
+}).format(d);
+
+const today     = fmt(new Date());
+const yesterday = fmt(new Date(Date.now() - 86400000));
+const tomorrow  = fmt(new Date(Date.now() + 86400000));
 ```
+
+**Sanity check before you send.** The message that triggered you carries a `time=` attribute — that is the current local time. If the date you computed disagrees with it, or if a live source (e.g. the weather API) reports a day you think is "tomorrow," stop and trust the real clock. Do not describe a live API's correct data as future data; that is the signature of a wrong date, not a wrong API.
 
 The `SKYLIGHT_FRAME_ID` environment variable is pre-configured — you do not need to call `list_frames` or pass `frame_id` explicitly to any tool.
 
