@@ -27,8 +27,12 @@ export function insertTask(
   },
 ): void {
   db.prepare(
+    // timestamp = the scheduled fire time, not the insert time. The container
+    // renders this column as the `time=` attribute on the task (see
+    // container/agent-runner/src/formatter.ts), and it is the agent's only
+    // signal for "now" — nothing else injects the current date.
     `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, platform_id, channel_type, thread_id, content, series_id)
-     VALUES (@id, @seq, datetime('now'), 'pending', 0, @processAfter, @recurrence, 'task', @platformId, @channelType, @threadId, @content, @id)`,
+     VALUES (@id, @seq, @processAfter, 'pending', 0, @processAfter, @recurrence, 'task', @platformId, @channelType, @threadId, @content, @id)`,
   ).run({
     ...task,
     seq: nextEvenSeq(db),
@@ -131,13 +135,20 @@ export function insertRecurrence(
   newId: string,
   nextRun: string | null,
 ): void {
+  // timestamp = nextRun (when this occurrence will fire), NOT the moment the
+  // clone is created. The clone is written right after the *previous*
+  // occurrence completes, so stamping 'now' left every recurring run reporting
+  // one full interval in the past — a daily 6am brief always thought it was
+  // yesterday. The agent has no other clock: the formatter turns this column
+  // into the `time=` attribute it reads as "now".
   db.prepare(
     `INSERT INTO messages_in (id, seq, kind, timestamp, status, process_after, recurrence, platform_id, channel_type, thread_id, content, series_id)
-     VALUES (?, ?, ?, datetime('now'), 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     newId,
     nextEvenSeq(db),
     msg.kind,
+    nextRun ?? new Date().toISOString(),
     nextRun,
     msg.recurrence,
     msg.platform_id,

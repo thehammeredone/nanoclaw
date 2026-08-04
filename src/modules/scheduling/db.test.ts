@@ -279,4 +279,47 @@ describe('insertRecurrence', () => {
     expect(row.series_id).toBe('task-orig');
     db.close();
   });
+
+  // The agent's only clock is the `time=` attribute the formatter renders from
+  // this column (container/agent-runner/src/formatter.ts:202). Stamping the
+  // clone at creation time made every recurring run report the *previous*
+  // occurrence's date — a daily task was always exactly one day behind.
+  it('stamps timestamp with the scheduled fire time, not the clone time', () => {
+    const db = freshDb();
+    insertBasicTask(db, 'task-orig', '0 6 * * *');
+    db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = 'task-orig'").run();
+
+    const msg: RecurringMessage = {
+      id: 'task-orig',
+      kind: 'task',
+      content: '{}',
+      recurrence: '0 6 * * *',
+      process_after: null,
+      platform_id: null,
+      channel_type: null,
+      thread_id: null,
+      series_id: 'task-orig',
+    };
+    const nextRun = new Date(Date.now() + 86400000).toISOString();
+    insertRecurrence(db, msg, 'task-next', nextRun);
+
+    const row = db.prepare('SELECT timestamp FROM messages_in WHERE id = ?').get('task-next') as {
+      timestamp: string;
+    };
+    expect(row.timestamp).toBe(nextRun);
+    db.close();
+  });
+
+  // `new Date('2026-08-04 10:02:53')` is parsed as *local* time by V8, so a
+  // naive space-separated stamp also skewed the rendered hour by the UTC
+  // offset. Storing a Z-suffixed instant removes the ambiguity.
+  it('stores an unambiguous UTC instant', () => {
+    const db = freshDb();
+    insertBasicTask(db, 'task-a', null);
+    const row = db.prepare('SELECT timestamp FROM messages_in WHERE id = ?').get('task-a') as {
+      timestamp: string;
+    };
+    expect(row.timestamp).toMatch(/Z$|[+-]\d{2}:\d{2}$/);
+    db.close();
+  });
 });
