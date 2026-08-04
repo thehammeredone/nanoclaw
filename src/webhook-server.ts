@@ -118,6 +118,22 @@ function ensureServer(): void {
     }
   });
 
+  // A `net.Server` 'error' event with no listener is rethrown as an uncaught
+  // exception, which kills the whole host. Binding a fixed port is inherently
+  // racy (a stale instance, a second host, an unrelated dev server), so treat
+  // a failed bind as a degraded channel rather than a fatal condition: the
+  // rest of the host — polling, delivery, non-webhook adapters — stays up.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    log.error('Webhook server failed to bind — webhook adapters unavailable', {
+      port,
+      code: err.code,
+      adapters: [...routes.keys()],
+      err,
+    });
+    // Drop the dead handle so a later registration can retry the bind.
+    server = null;
+  });
+
   server.listen(port, '0.0.0.0', () => {
     log.info('Webhook server started', { port, adapters: [...routes.keys()] });
   });
