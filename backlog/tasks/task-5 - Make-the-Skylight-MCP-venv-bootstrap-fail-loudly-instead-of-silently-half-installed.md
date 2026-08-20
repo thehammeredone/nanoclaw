@@ -3,10 +3,11 @@ id: TASK-5
 title: >-
   Make the Skylight MCP venv bootstrap fail loudly instead of silently
   half-installed
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-29 13:49'
-updated_date: '2026-08-20 15:02'
+updated_date: '2026-08-20 22:30'
 labels:
   - aurora
   - skylight
