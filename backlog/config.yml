@@ -1,6 +1,6 @@
 project_name: "nanoclaw-v2"
 default_status: "To Do"
-statuses: ["To Do", "In Progress", "Done"]
+statuses: ["Needs Review", "To Do", "In Progress", "Done"]
 labels: []
 date_format: yyyy-mm-dd
 max_column_width: 20

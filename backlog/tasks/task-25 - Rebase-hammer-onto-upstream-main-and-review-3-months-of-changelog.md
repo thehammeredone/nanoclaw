@@ -1,9 +1,10 @@
 ---
 id: TASK-25
 title: Rebase hammer onto upstream main and review 3 months of changelog
-status: To Do
+status: Needs Review
 assignee: []
 created_date: '2026-08-20 15:01'
+updated_date: '2026-08-20 16:35'
 labels:
   - infra
   - upgrade

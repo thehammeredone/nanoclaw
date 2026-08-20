@@ -3,10 +3,10 @@ id: TASK-6
 title: >-
   Share Skylight venv and auth token across Aurora sessions instead of
   per-session
-status: To Do
+status: Needs Review
 assignee: []
 created_date: '2026-07-29 13:50'
-updated_date: '2026-08-20 15:02'
+updated_date: '2026-08-20 16:35'
 labels:
   - aurora
   - skylight
