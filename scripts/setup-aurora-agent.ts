@@ -158,14 +158,44 @@ function main(): void {
       command: 'bash',
       args: [
         '-lc',
+        // Provisioning must fail LOUDLY. The original guard was `[ -d "$V" ] || install`,
+        // which only tested that the directory existed — and `python3 -m venv` creates it
+        // before pip runs, so any pip failure left a half-built venv that satisfied the
+        // guard forever after. Every later launch skipped the reinstall and exec'd a python
+        // whose venv was missing most of its dependencies, surfacing as a downstream
+        // `ModuleNotFoundError: No module named 'anyio'` that reads like a code bug rather
+        // than a provisioning one. This bit Aurora three separate times (TASK-5).
+        //
+        // The guard is now a sentinel file written only after pip exits 0 AND `import
+        // server` succeeds, so an interrupted install is indistinguishable from no install
+        // and gets rebuilt from scratch. On failure we exit non-zero with the venv path on
+        // stderr instead of falling through to `exec … -m server`.
+        //
+        // Everything chatty is redirected to stderr: this process's stdout is the MCP
+        // stdio JSON-RPC channel, so pip's (now un-`-q`'d) progress output would corrupt it.
         [
-          '[ -d /workspace/.skylight-venv-0.2.1 ] ||',
-          '  (python3 -m venv /workspace/.skylight-venv-0.2.1 &&',
-          '   /workspace/.skylight-venv-0.2.1/bin/pip install -q',
-          '   /workspace/extra/skylight/dist/skylight-0.2.1-py3-none-any.whl);',
+          'set -u;',
+          'VER=0.2.1;',
+          'V=/workspace/.skylight-venv-$VER;',
+          'W=/workspace/extra/skylight/dist/skylight-$VER-py3-none-any.whl;',
+          'fail() { echo "skylight-mcp: PROVISIONING FAILED ($1). venv=$V wheel=$W.' +
+            ' Refusing to start the server -- launching it now would surface as a misleading' +
+            ' ModuleNotFoundError. The incomplete venv has no sentinel and will be rebuilt from' +
+            ' scratch on the next launch; to force that now, rm -rf $V.' +
+            ' See docs/runbooks/aurora-skylight-mcp.md." >&2; exit 1; };',
+          'if [ ! -f "$V/.provisioned" ]; then',
+          'echo "skylight-mcp: provisioning $V from $W" >&2;',
+          'rm -rf "$V" || fail "could not remove stale venv";',
+          'python3 -m venv "$V" >&2 || fail "python3 -m venv failed";',
+          '"$V/bin/pip" install "$W" >&2 || fail "pip install failed";',
+          '( cd / && "$V/bin/python" -c "import server" ) >&2 ||' +
+            ' fail "post-install import check failed - venv is missing dependencies";',
+          ': > "$V/.provisioned" || fail "could not write sentinel";',
+          'echo "skylight-mcp: provisioned OK" >&2;',
+          'fi;',
           'mkdir -p /workspace/.skylight;',
-          'cd /workspace/extra/skylight &&',
-          'exec /workspace/.skylight-venv-0.2.1/bin/python -m server',
+          'cd /workspace/extra/skylight || fail "cd /workspace/extra/skylight failed";',
+          'exec "$V/bin/python" -m server',
         ].join(' '),
       ],
       env: {
