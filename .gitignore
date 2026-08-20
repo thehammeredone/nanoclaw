@@ -29,6 +29,8 @@ groups/*/.claude/
 # The one local source change is vendored as groups/ai-news/ai-news-radar.patch.
 groups/ai-news/ai-news-radar/
 groups/ai-news/digest-*
+# Article screenshots the digest run drops next to its output.
+groups/ai-news/*.png
 
 # Composer-managed artifacts (regenerated every spawn)
 **/.claude-shared.md
