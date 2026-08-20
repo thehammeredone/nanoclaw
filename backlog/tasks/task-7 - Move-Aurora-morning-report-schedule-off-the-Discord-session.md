@@ -1,7 +1,7 @@
 ---
 id: TASK-7
 title: Move Aurora morning-report schedule off the Discord session
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:49'
@@ -41,11 +41,19 @@ Related: TASK-6 already documents that b2yjgn is the session that produces the s
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Morning brief runs from a session that survives Discord teardown (Matrix-routed)
-- [ ] #2 Verified firing end to end at least once, with real Skylight data
-- [ ] #3 Old recurring row and its series removed from the Discord session so the brief cannot double-post
-- [ ] #4 Skylight credentials no longer stored in plaintext in the scheduled prompt
+- [x] #1 Morning brief runs from a session that survives Discord teardown (Matrix-routed)
+- [x] #2 Verified firing end to end at least once, with real Skylight data
+- [x] #3 Old recurring row and its series removed from the Discord session so the brief cannot double-post
+- [x] #4 Skylight credentials no longer stored in plaintext in the scheduled prompt
 <!-- AC:END -->
+
+
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -111,3 +119,9 @@ REVIEW NOTE: spec compliance was verified by the orchestrator directly against l
 state (primary evidence) rather than delegated. The code-quality gate did not run because
 this task produced no repo diff -- there is nothing for code-review to read.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Moved Aurora's daily 06:00 brief from the Discord-wired session sess-1782319186963-b2yjgn to the Matrix session sess-1783609624398-smn6q9, so it survives TASK-8's Discord teardown. New recurring row task-1787267541212-gro4qg with matrix routing and even (host-parity) seq; old pending row deleted and its series left inert. Verified exactly one firing row remains across all four Aurora sessions, so the brief cannot double-post. AC#2 verified with a real end-to-end firing returning genuine Skylight data (16 chores with resolved overdue dates, two calendar events, live weather) rather than the empty-state failure signature. AC#4 was already satisfied before this task. Found that Ann has never received an Aurora report from any session.
+<!-- SECTION:FINAL_SUMMARY:END -->
