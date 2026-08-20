@@ -1,10 +1,10 @@
 ---
 id: TASK-19
 title: Move Skylight credentials out of plaintext into the OneCLI vault
-status: To Do
+status: Needs Review
 assignee: []
 created_date: '2026-07-31 03:20'
-updated_date: '2026-08-20 23:45'
+updated_date: '2026-08-20 23:57'
 labels:
   - skylight
 dependencies: []
@@ -84,4 +84,6 @@ WHAT IS ACTUALLY POSSIBLE (needs an operator decision):
 Not proceeding unilaterally: this is a security-architecture choice with materially different
 outcomes and no safe default, and the task itself says to confirm viability before committing
 to an approach.
+
+PARKED 2026-08-20 by the orchestrator at the operator's direction. AC#1 is done and verified; AC#2/#3 await an architecture decision between the four options above. Moved to Needs Review so the orchestrator's selector can advance past it.
 <!-- SECTION:NOTES:END -->
