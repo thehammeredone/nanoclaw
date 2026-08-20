@@ -166,16 +166,42 @@ function main(): void {
         // `ModuleNotFoundError: No module named 'anyio'` that reads like a code bug rather
         // than a provisioning one. This bit Aurora three separate times (TASK-5).
         //
-        // The guard is now a sentinel file written only after pip exits 0 AND `import
-        // server` succeeds, so an interrupted install is indistinguishable from no install
+        // The guard is now a sentinel file written only after pip exits 0 AND the import
+        // probe succeeds, so an interrupted install is indistinguishable from no install
         // and gets rebuilt from scratch. On failure we exit non-zero with the venv path on
         // stderr instead of falling through to `exec … -m server`.
         //
+        // The probe is `import server.app`, run from the same cwd the server runs from.
+        // `import server` is useless as a health check: server/__init__.py imports nothing
+        // at module level (docstring + __all__ + a lazy __getattr__), so it succeeds on a
+        // venv holding the wheel and none of its ~70 dependencies. `server/app.py` is where
+        // `from fastmcp import FastMCP` lives, so importing it exercises the dependency
+        // closure. Running the probe from /workspace/extra/skylight rather than `/` also
+        // makes it check the code that actually executes: `exec … -m server` puts the cwd
+        // ahead of site-packages on sys.path, so the running server is the read-only source
+        // mount and the venv supplies only the dependencies.
+        //
+        // The sentinel is deleted *before* the `rm -rf`, not after: two launches can both
+        // observe "no sentinel" and race, and if the second one's `rm -rf` is killed partway
+        // through a tree the first has already sentinelled, the survivor is a gutted venv
+        // that looks provisioned forever. Removing the token first means any interruption
+        // leaves an unsentinelled venv, which is always rebuilt.
+        //
+        // Two failure helpers, because the advice differs: `fail` is for provisioning (the
+        // venv is suspect — say so, and offer `rm -rf $V`), `die` is for the steps after the
+        // sentinel is written (the venv is fine; the cause is almost always a missing mount,
+        // and deleting ~100 MB of healthy venv would not help).
+        //
         // Everything chatty is redirected to stderr: this process's stdout is the MCP
         // stdio JSON-RPC channel, so pip's (now un-`-q`'d) progress output would corrupt it.
+        //
+        // This string must stay byte-identical to `container_configs.mcp_servers` →
+        // skylight.args[1] in data/v2.db, which is the copy that actually runs. Re-running
+        // this script overwrites that column, so a stale VER= here silently downgrades the
+        // live agent.
         [
           'set -u;',
-          'VER=0.2.1;',
+          'VER=0.2.3;',
           'V=/workspace/.skylight-venv-$VER;',
           'W=/workspace/extra/skylight/dist/skylight-$VER-py3-none-any.whl;',
           'fail() { echo "skylight-mcp: PROVISIONING FAILED ($1). venv=$V wheel=$W.' +
@@ -183,18 +209,24 @@ function main(): void {
             ' ModuleNotFoundError. The incomplete venv has no sentinel and will be rebuilt from' +
             ' scratch on the next launch; to force that now, rm -rf $V.' +
             ' See docs/runbooks/aurora-skylight-mcp.md." >&2; exit 1; };',
+          'die() { echo "skylight-mcp: STARTUP FAILED ($1). The venv at $V is provisioned and' +
+            ' healthy -- this is not a provisioning problem, so do NOT delete it. The usual cause' +
+            ' is a missing or misconfigured mount: /workspace/extra/skylight comes from' +
+            ' container_configs.additional_mounts.' +
+            ' See docs/runbooks/aurora-skylight-mcp.md." >&2; exit 1; };',
           'if [ ! -f "$V/.provisioned" ]; then',
           'echo "skylight-mcp: provisioning $V from $W" >&2;',
+          'rm -f "$V/.provisioned" || fail "could not invalidate stale sentinel";',
           'rm -rf "$V" || fail "could not remove stale venv";',
           'python3 -m venv "$V" >&2 || fail "python3 -m venv failed";',
           '"$V/bin/pip" install "$W" >&2 || fail "pip install failed";',
-          '( cd / && "$V/bin/python" -c "import server" ) >&2 ||' +
+          '( cd /workspace/extra/skylight && "$V/bin/python" -c "import server.app" ) >&2 ||' +
             ' fail "post-install import check failed - venv is missing dependencies";',
           ': > "$V/.provisioned" || fail "could not write sentinel";',
           'echo "skylight-mcp: provisioned OK" >&2;',
           'fi;',
-          'mkdir -p /workspace/.skylight;',
-          'cd /workspace/extra/skylight || fail "cd /workspace/extra/skylight failed";',
+          'mkdir -p /workspace/.skylight || die "mkdir /workspace/.skylight failed";',
+          'cd /workspace/extra/skylight || die "cd /workspace/extra/skylight failed";',
           'exec "$V/bin/python" -m server',
         ].join(' '),
       ],

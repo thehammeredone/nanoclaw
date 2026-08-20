@@ -23,37 +23,43 @@ There is no image layer for it. The whole thing is bootstrapped at MCP-launch ti
 
 1. `/home/hammer/git/Skylight` is bind-mounted **read-only** at `/workspace/extra/skylight`
    (`container_configs.additional_mounts`).
-2. On first launch the bootstrap line removes any stale
+2. On first launch the bootstrap line deletes any stale sentinel, removes any stale
    `/workspace/.skylight-venv-<version>/`, recreates it, `pip install`s the wheel from that
-   mount, verifies the result with `python -c "import server"`, and only then writes the
+   mount, verifies the result with `python -c "import server.app"`, and only then writes the
    sentinel file `/workspace/.skylight-venv-<version>/.provisioned`.
 3. Subsequent launches see the **sentinel** and skip straight to
    `exec …/bin/python -m server`.
 
-The whole thing is one `bash -lc` string. `command` is `bash`, `args` is
-`["-lc", "<the line below>"]`, and the credentials live in the sibling `env` object (shown
-here as `<redacted>` — never paste the real values anywhere):
+The whole thing is one `bash -lc` string. `command` is `bash` and `args` is
+`["-lc", "<the line below>"]`. The Skylight credentials are *not* in that line — they are
+separate keys (`SKYLIGHT_EMAIL`, `SKYLIGHT_PASSWORD`, `SKYLIGHT_FRAME_ID`) on the sibling
+`env` object, which is deliberately not reproduced here. Never paste those values into a
+doc, a commit message, or a chat.
 
 ```bash
 set -u; VER=0.2.3; V=/workspace/.skylight-venv-$VER;
 W=/workspace/extra/skylight/dist/skylight-$VER-py3-none-any.whl;
 fail() { echo "skylight-mcp: PROVISIONING FAILED ($1). venv=$V wheel=$W. Refusing to start the server -- launching it now would surface as a misleading ModuleNotFoundError. The incomplete venv has no sentinel and will be rebuilt from scratch on the next launch; to force that now, rm -rf $V. See docs/runbooks/aurora-skylight-mcp.md." >&2; exit 1; };
+die() { echo "skylight-mcp: STARTUP FAILED ($1). The venv at $V is provisioned and healthy -- this is not a provisioning problem, so do NOT delete it. The usual cause is a missing or misconfigured mount: /workspace/extra/skylight comes from container_configs.additional_mounts. See docs/runbooks/aurora-skylight-mcp.md." >&2; exit 1; };
 if [ ! -f "$V/.provisioned" ]; then
   echo "skylight-mcp: provisioning $V from $W" >&2;
+  rm -f "$V/.provisioned"         || fail "could not invalidate stale sentinel";
   rm -rf "$V"                     || fail "could not remove stale venv";
   python3 -m venv "$V" >&2        || fail "python3 -m venv failed";
   "$V/bin/pip" install "$W" >&2   || fail "pip install failed";
-  ( cd / && "$V/bin/python" -c "import server" ) >&2 || fail "post-install import check failed - venv is missing dependencies";
+  ( cd /workspace/extra/skylight && "$V/bin/python" -c "import server.app" ) >&2 || fail "post-install import check failed - venv is missing dependencies";
   : > "$V/.provisioned"           || fail "could not write sentinel";
   echo "skylight-mcp: provisioned OK" >&2;
 fi;
-mkdir -p /workspace/.skylight;
-cd /workspace/extra/skylight || fail "cd /workspace/extra/skylight failed";
+mkdir -p /workspace/.skylight || die "mkdir /workspace/.skylight failed";
+cd /workspace/extra/skylight || die "cd /workspace/extra/skylight failed";
 exec "$V/bin/python" -m server
 ```
 
 (The stored value is a single line; it is broken up here only to be readable. The
-version-controlled seeder in `scripts/setup-aurora-agent.ts` builds the identical string.)
+version-controlled seeder in `scripts/setup-aurora-agent.ts` assembles the same string,
+including the same `VER=`, and re-running the seeder overwrites the DB column with it. The
+two are kept in sync by hand — see the last bullet of "Known rough edges".)
 
 **Consequences worth knowing:**
 
@@ -62,15 +68,42 @@ version-controlled seeder in `scripts/setup-aurora-agent.ts` builds the identica
   directory name, so a new version gets a fresh venv rather than a dirty upgrade in place.
 - **The guard is the sentinel, not the directory.** `[ ! -f "$V/.provisioned" ]` is what
   decides whether to (re)provision, and the sentinel is written only after `pip` exits 0
-  *and* `import server` succeeds. A venv that exists but has no sentinel is treated as
+  *and* the import probe succeeds. A venv that exists but has no sentinel is treated as
   absent and rebuilt from scratch — so an interrupted or failed install can no longer
   poison every later launch. (Before 2026-08-20 the guard was `[ -d "$V" ]`, which
   `python3 -m venv` satisfies *before* pip runs; that bug bit Aurora three times. See
   "Recovering from a half-built venv" below.)
+- **The probe is `import server.app`, not `import server`.** `server/__init__.py` imports
+  nothing at module level — a docstring, `__all__`, and a lazy `__getattr__` — so
+  `import server` succeeds on a venv holding the wheel and *none* of its ~70 dependencies.
+  `server/app.py` is where `from fastmcp import FastMCP` lives, so importing it exercises
+  the dependency closure. Verified on a deliberately dependency-less venv (9 site-packages
+  entries): `import server` passes, `import server.app` fails with
+  `ModuleNotFoundError: No module named 'fastmcp'`.
+- **The probe runs from the server's real cwd.** It is
+  `( cd /workspace/extra/skylight && "$V/bin/python" -c "import server.app" )`, matching the
+  `cd /workspace/extra/skylight; exec "$V/bin/python" -m server` at the end of the line. This
+  matters more than it looks: with `-m`, the cwd precedes site-packages on `sys.path`, so the
+  code that actually runs is the **read-only source mount**, not the wheel copy in the venv.
+  The venv effectively supplies only the dependencies. Probing from the same cwd checks the
+  thing that will execute. (Before 2026-08-20 the probe ran with `cd /`, which validated the
+  wheel copy instead.)
+- **The stale sentinel is deleted before the `rm -rf`, not after.** Two launches can both
+  observe "no sentinel" and race. If the second one's `rm -rf` is interrupted partway through
+  a tree the first has already finished and sentinelled, the survivor would be a gutted venv
+  that looks provisioned forever — the exact sticky-poison failure the sentinel exists to
+  prevent. Removing the token first means any interruption leaves an *unsentinelled* venv,
+  which is always rebuilt.
 - **Provisioning failure is fatal and loud.** On any failure the line writes
   `skylight-mcp: PROVISIONING FAILED (…)` to stderr naming the venv and wheel paths, then
   exits non-zero. It deliberately does **not** fall through to `exec … -m server`, because
   that is what used to turn a provisioning failure into a misleading `ModuleNotFoundError`.
+- **Failures *after* the sentinel is written use `die`, not `fail`.** `mkdir -p
+  /workspace/.skylight` and the final `cd` run once provisioning has already succeeded, so
+  the venv is known-good and the realistic cause is a missing mount, not a bad install. They
+  print `skylight-mcp: STARTUP FAILED (…)` and explicitly tell you *not* to delete the venv —
+  the `fail` message's `rm -rf $V` advice would destroy ~100 MB of healthy venv to fix an
+  `additional_mounts` misconfiguration.
 - **All provisioning chatter goes to stderr.** `pip` no longer runs with `-q` (its errors
   need to reach the container log), so every provisioning command is redirected `>&2`.
   This process's stdout is the MCP stdio JSON-RPC channel — anything printed there
@@ -95,14 +128,33 @@ wheel=/workspace/extra/skylight/dist/skylight-0.2.3-py3-none-any.whl. Refusing t
 server -- launching it now would surface as a misleading ModuleNotFoundError. …
 ```
 
-The parenthesised reason is one of `python3 -m venv failed`, `pip install failed`, or
-`post-install import check failed - venv is missing dependencies` — that last one is the
-old `ModuleNotFoundError: No module named 'anyio'` symptom, caught at provisioning time and
-correctly labelled. Aurora sees the MCP server fail to start, not a working server with
-broken tools.
+The parenthesised reason is one of six, in the order they can occur:
+
+| Reason | Meaning |
+|--------|---------|
+| `could not invalidate stale sentinel` | `rm -f "$V/.provisioned"` failed — venv dir not writable |
+| `could not remove stale venv` | `rm -rf "$V"` failed — usually a read-only or busy mount |
+| `python3 -m venv failed` | no usable `python3`, or no space |
+| `pip install failed` | the common one — missing wheel, no `PIP_CERT`, network/proxy |
+| `post-install import check failed - venv is missing dependencies` | pip claimed success but the dependency closure is incomplete |
+| `could not write sentinel` | `/workspace` not writable |
+
+The import-check reason is the old `ModuleNotFoundError: No module named 'anyio'` symptom,
+caught at provisioning time and correctly labelled. Aurora sees the MCP server fail to
+start, not a working server with broken tools.
+
+Two further reasons appear under `STARTUP FAILED` rather than `PROVISIONING FAILED`, and
+mean the venv is fine but the container isn't: `mkdir /workspace/.skylight failed` and
+`cd /workspace/extra/skylight failed`. Check `container_configs.additional_mounts`; do not
+delete the venv.
 
 **How to spot a half-built venv on disk.** Count the entries in `site-packages`. A healthy
-Skylight venv has ~160; a failed install leaves 7 — pip and setuptools and nothing else.
+Skylight venv has ~160. A half-built one has anywhere from ~9 (just pip, setuptools and the
+`server` package itself, if pip landed the wheel but none of its dependencies) up to a few
+dozen (if pip died partway through the dependency list — e.g. the real 0.2.1 casualty still
+on disk has 16, including `playwright` and `greenlet`). The signature is not a specific
+number: it is the *absence* of the big names — `fastmcp`, `mcp`, `pydantic`, `httpx`,
+`anyio`. Check for those rather than counting.
 
 ```bash
 cd data/v2-sessions/ag-1782273071167-th1q6f
@@ -112,7 +164,9 @@ done; done
 ```
 
 Anything without a sentinel will be rebuilt on next launch regardless of what's inside it,
-so the count is a diagnostic, not a decision.
+so the count is a diagnostic, not a decision. A venv *with* a sentinel is trusted blindly —
+the only way one of those can be broken is if somebody hand-placed the sentinel (see
+"Marking a venv you have verified by hand"), so re-run the probe there before believing it.
 
 **Forcing a rebuild.** Delete the sentinel (or the whole directory) and relaunch:
 
@@ -134,13 +188,17 @@ docker run --rm --network none \
   -v "$PWD/data/v2-sessions/<group>/<session>":/workspace:ro \
   -v /home/hammer/git/Skylight:/workspace/extra/skylight:ro \
   --entrypoint bash <image-tag> \
-  -lc 'cd / && /workspace/.skylight-venv-<version>/bin/python -c "import server"'
+  -lc 'cd /workspace/extra/skylight && /workspace/.skylight-venv-<version>/bin/python -c "import server.app"'
 # only if that exits 0:
 : > data/v2-sessions/<group>/<session>/.skylight-venv-<version>/.provisioned
 ```
 
-`cd /` matters: it keeps the repo mount off `sys.path` so the check tests the venv rather
-than the source tree.
+Both halves matter. `import server.app` rather than `import server`, because
+`server/__init__.py` imports nothing at module level and so passes on a venv with no
+dependencies at all. And `cd /workspace/extra/skylight` rather than `cd /`, because that is
+the cwd the server runs from — `-m server` puts it ahead of site-packages on `sys.path`, so
+this checks the source-mount code path that will actually execute, against the venv's
+dependencies.
 
 ## Authentication
 
@@ -256,7 +314,10 @@ print(\"OK\", r.scheme, r.frame_id)"'
 
 Setting `PYTHONPATH` to the mount runs the repo source directly against an
 already-provisioned venv — this tests a source change without needing a wheel build, a
-network round-trip, or the proxy CA.
+network round-trip, or the proxy CA. `PYTHONPATH` is genuinely needed *here* because this
+command never `cd`s: the image's `WORKDIR` is `/workspace/group`, so without it `from server
+import auth` would resolve to the wheel copy inside the venv. The live server doesn't need
+it, because it `cd`s to the mount first and `-m` puts the cwd on `sys.path` for free.
 
 Note this invokes the venv's python *directly*. Do not run the DB's bootstrap line by hand
 against a live session directory: without `PIP_CERT` the install fails, and the first thing
@@ -279,4 +340,9 @@ broken one.
 - **The bootstrap line lives in a DB column, not in version control.** `container_configs
   .mcp_servers` is the authoritative copy; `scripts/setup-aurora-agent.ts` holds a
   version-controlled *seeder* copy of the same logic, and the two have to be kept in sync by
-  hand. Anyone auditing the repo sees the seeder, not what is actually running.
+  hand. Anyone auditing the repo sees the seeder, not what is actually running. The seeder is
+  idempotent in the sense that re-running it is *safe*, not that it is a no-op: it overwrites
+  `mcp_servers` unconditionally, so if its `VER=` has drifted behind the DB's, re-running it
+  silently downgrades Aurora to an older wheel. Sync the seeder before running it, and check
+  the block quoted above against the DB after. This third copy — the quoted block in this
+  runbook — is kept byte-identical to the other two as well.
