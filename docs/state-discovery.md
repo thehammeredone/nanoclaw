@@ -185,7 +185,16 @@ WHERE m.type = 'table' AND m.name != 'agent_groups'
 
 **Cascades** — `container_configs.agent_group_id` is the only `ON DELETE CASCADE` in the central DB. It disappears on its own.
 
-**Blocks** — every other `agent_group_id` reference is a plain `REFERENCES agent_groups(id)`. Deleting a group that still has rows in `sessions`, `messaging_group_agents`, `agent_destinations`, `agent_group_members`, `user_roles` or the `pending_*` tables raises an FK error. This is why `ncl groups delete` — a bare `DELETE` in `genericDelete` (`src/cli/crud.ts:200`) — fails for any group that has ever been wired or run.
+**Blocks** — eight of the ten `agent_group_id` tables declare a plain `REFERENCES agent_groups(id)` with no `ON DELETE` clause (i.e. `NO ACTION`): `agent_destinations`, `agent_group_members`, `messaging_group_agents`, `pending_approvals`, `pending_channel_approvals`, `pending_sender_approvals`, `sessions`, `user_roles`. Deleting a group that still has rows in any of them raises an FK error. This is why `ncl groups delete` — a bare `DELETE` in `genericDelete` (`src/cli/crud.ts:200`) — fails for any group that has ever been wired or run.
+
+**Blocks a _session_ delete, from a direction group-scoped sweeps miss** — two FKs point at `sessions` rather than `agent_groups`. Neither table has an `agent_group_id` column, so neither shows up in the ten-table sweep above, and both will refuse a `DELETE FROM sessions`:
+
+| Reference | On delete |
+|---|---|
+| `pending_questions.session_id` | `NO ACTION` → blocks (`src/db/migrations/001-initial.ts:101`) |
+| `pending_approvals.session_id` | `NO ACTION` → blocks |
+
+`pending_approvals` carries *both*: an `agent_group_id` FK to `agent_groups` and a `session_id` FK to `sessions`. Clear these before deleting session rows — see teardown step 4.
 
 **Silently dangles** — three references have no FK at all and will never error:
 
@@ -193,7 +202,7 @@ WHERE m.type = 'table' AND m.name != 'agent_groups'
 |---|---|
 | `agent_destinations.target_id` | Polymorphic: holds a messaging group id *or* an agent group id depending on `target_type` |
 | `destinations.agent_group_id` in each session's `inbound.db` | Different SQLite file; cross-file FKs are impossible |
-| `pending_questions.session_id` | Has an FK to `sessions`, but **no `agent_group_id` column** — so it is invisible to group-scoped sweeps and can block a `sessions` delete from a direction you did not look |
+| `unregistered_senders.agent_group_id` | Declared as a bare `TEXT` column with no `REFERENCES` clause (`src/db/migrations/008-dropped-messages.ts:16`). It is the one `agent_group_id` table that will *not* block a group delete — and the one a sweep is most likely to leave behind |
 
 Practical consequence: a group-scoped sweep removes a group's *outbound* edges but never the *inbound* ones. Other groups keep pointing at the deleted group, and the breakage surfaces at runtime rather than at delete time.
 
@@ -203,7 +212,7 @@ Practical consequence: a group-scoped sweep removes a group's *outbound* edges b
 1. kill running containers for the group's sessions
 2. delete agent_destinations rows in OTHER groups where target_id = this group   (no FK — must be hunted)
 3. clear destinations rows in OTHER groups' session inbound.db files             (different DB — must be hunted)
-4. clear pending_questions for this group's sessions                             (no agent_group_id column)
+4. clear pending_questions AND pending_approvals for this group's sessions       (both FK sessions; pending_questions has no agent_group_id column)
 5. delete rows in the ten agent_group_id tables
 6. delete the agent_groups row
 7. rm -rf groups/<folder>/
@@ -224,7 +233,7 @@ Steps 5–8 are what `scripts/delete-cli-agent.ts --folder <folder>` already doe
 | `groups/<folder>/` | `agent_groups.folder` | CLAUDE.md, CLAUDE.local.md, `.claude-fragments/`, skills, materialized `container.json` |
 | `data/v2-sessions/<agent-group-id>/<session-id>/` | agent group id, then session id | `inbound.db` + `outbound.db`; can outlive its `sessions` row |
 | Docker image tag | `nanoclaw-agent-v2-<install-slug>:<agent-group-id>` | Slug is derived from the project root path (`src/install-slug.ts:27`) so parallel installs on one host don't clobber each other. Only groups that have been built have a tag |
-| OneCLI vault agent | `identifier` = agent group id | Auto-created by `ensureAgent` on first spawn (`src/container-runner.ts:385`). Identifiers must start with a letter, so ids beginning with a digit get an `ag-` prefix (`src/container-runner.ts:139`) — `54c8dbdf-…` becomes `ag-54c8dbdf-…`, while `f09aa5a1-…` is used as-is. Never removed automatically |
+| OneCLI vault agent | `identifier` = agent group id | Auto-created by `ensureAgent` on first spawn (`src/container-runner.ts:429`). Identifiers must start with a letter, so ids beginning with a digit get an `ag-` prefix (`src/container-runner.ts:139`) — `54c8dbdf-…` becomes `ag-54c8dbdf-…`, while `f09aa5a1-…` is used as-is. Never removed automatically |
 
 ### Scheduling is session-scoped and wiring-independent
 

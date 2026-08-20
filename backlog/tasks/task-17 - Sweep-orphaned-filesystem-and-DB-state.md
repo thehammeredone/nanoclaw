@@ -4,6 +4,7 @@ title: Sweep orphaned filesystem and DB state
 status: To Do
 assignee: []
 created_date: '2026-07-31 03:19'
+updated_date: '2026-08-20 22:30'
 labels:
   - hygiene
 dependencies: []
@@ -44,4 +45,10 @@ Detection queries are in docs/state-discovery.md under "Orphan detection".
 
 <!-- SECTION:NOTES:BEGIN -->
 Provenance: Claude Code session 9934a222-4185-48a6-8de2-07b8bbe71cf7 (2026-07-30). Discovery data: docs/work-records/2026-07-30-decommission-planning-aurora-discord-wiring-and-four-agent-groups.md and docs/state-discovery.md
+
+CORRECTION 2026-08-20 (orchestrator session fe8a8e37): same overstatement as TASK-13.
+scripts/delete-cli-agent.ts DOES remove data/v2-sessions/<agent-group-id>/ -- it keys the
+rm on ag.id (delete-cli-agent.ts:70-72), not on sessions rows. It must run before the
+agent_groups row is deleted, since it resolves the group by --folder. Orphaned session dirs
+are only unreachable for groups whose agent_groups row is ALREADY gone.
 <!-- SECTION:NOTES:END -->

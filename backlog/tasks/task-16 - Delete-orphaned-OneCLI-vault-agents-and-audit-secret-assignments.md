@@ -17,7 +17,7 @@ ordinal: 16000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Every agent group gets a OneCLI vault agent auto-created on first container spawn (ensureAgent, src/container-runner.ts:385, identifier = agent group id with an "ag-" prefix when the id starts with a digit). Nothing ever removes one. So decommissioning a group leaves behind a vault agent that still holds secret assignments -- real credentials attached to an identity nanoclaw no longer knows about.
+Every agent group gets a OneCLI vault agent auto-created on first container spawn (ensureAgent, src/container-runner.ts:429, identifier = agent group id with an "ag-" prefix when the id starts with a digit). Nothing ever removes one. So decommissioning a group leaves behind a vault agent that still holds secret assignments -- real credentials attached to an identity nanoclaw no longer knows about.
 
 Dead ends created by the current decommission:
   Memory          48d0d710-48a6-424c-8cbf-c42d98ff0bdd

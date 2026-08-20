@@ -4,7 +4,7 @@ title: Purge memory and coder references from the surviving agents
 status: To Do
 assignee: []
 created_date: '2026-07-31 02:50'
-updated_date: '2026-08-20 15:09'
+updated_date: '2026-08-20 22:30'
 labels:
   - aurora
 dependencies: []
@@ -69,4 +69,16 @@ STILL LIVE elsewhere (so AC#3/#4 still have real work): sweeping all sessions fo
 WHY THIS MATTERS MORE THAN IT LOOKS: Aurora's CLAUDE.local.md says 'Before responding to any message from Hammer, query memory ... Wait for the reply. Apply any returned guidance before composing your response.' That is a mandatory blocking step at the top of every turn that always fails. It also says to send every behavioural correction to memory -- so every correction the operator has given Aurora has gone to a dead address. This is a direct mechanical explanation for 'corrections do not stick', independent of the venv outage. Cross-ref TASK-24.
 
 QUERY GOTCHA for whoever picks this up: the destinations table column is 'type', NOT 'kind'. A sweep using 'kind' errors out and, if stderr is suppressed, silently returns nothing -- which reads as 'no agent destinations anywhere' and is wrong. Schema: name, display_name, type, channel_type, platform_id, agent_group_id.
+
+CORRECTION 2026-08-20 (orchestrator session fe8a8e37), verified against source:
+
+The open question 'does the host rewrite per-session destinations on spawn?' is already
+answered: YES, unconditionally. writeDestinations (src/modules/agent-to-agent/write-destinations.ts)
+ends by calling replaceDestinations, which is a full DELETE + re-insert inside a transaction
+(src/db/session-db.ts:66-76: 'DELETE FROM destinations' then INSERT for each resolved row).
+
+So every session's inbound.db destinations table is rebuilt from the central agent_destinations
+rows on each spawn. Fixing the central rows is sufficient; hand-editing live inbound.db files
+is unnecessary and will be overwritten anyway. AC #4 should pass trivially once the central
+rows are correct.
 <!-- SECTION:NOTES:END -->

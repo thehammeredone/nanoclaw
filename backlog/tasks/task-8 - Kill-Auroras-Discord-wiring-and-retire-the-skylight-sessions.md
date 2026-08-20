@@ -4,7 +4,7 @@ title: Kill Aurora's Discord wiring and retire the skylight sessions
 status: To Do
 assignee: []
 created_date: '2026-07-31 02:49'
-updated_date: '2026-08-20 15:09'
+updated_date: '2026-08-20 22:30'
 labels:
   - cleanup
 dependencies:
@@ -68,4 +68,25 @@ So the end state is:
 Sequencing: this task may still delete the Discord wiring and the three Discord sessions without waiting on TASK-23. Do NOT delete wiring 95b041ba here -- leave Ann pointed at Aurora until the clone exists, or Ann loses service in the gap. Dropping 'ann' from Aurora's destinations belongs to TASK-23, not here.
 
 Confirmed still accurate on 2026-08-20: the three Discord sessions are b2yjgn (holds the cron), whzaig, ah2yj4; Ann has never had a session at all, so nothing of hers is at risk in this teardown.
+
+CORRECTION 2026-08-20 (orchestrator session fe8a8e37), verified against source:
+
+The sequencing note 'sessions.agent_group_id and .messaging_group_id are real FKs with
+foreign_keys=ON, so the session rows need raw SQL' has the reasoning inverted. Those are
+OUTBOUND FKs on the row being deleted -- they constrain what the row may point at and never
+block its own DELETE.
+
+The real inbound blockers on a 'DELETE FROM sessions' are:
+  pending_questions.session_id   REFERENCES sessions(id), no ON DELETE -> NO ACTION -> blocks
+  pending_approvals.session_id   REFERENCES sessions(id), no ON DELETE -> NO ACTION -> blocks
+Neither table has an agent_group_id column, so neither appears in a group-scoped sweep.
+Clear both before deleting the session rows.
+
+Checked live: both are currently 0 rows for all three sessions in scope
+(sess-1782319186963-b2yjgn, sess-1782785033830-whzaig, sess-1783527491016-ah2yj4), so the
+delete will succeed today. Re-check immediately before executing -- an approval or question
+raised in between would block it.
+
+The conclusion 'needs raw SQL' still stands, for the other reason given in the same sentence:
+ncl sessions is a read-only resource (list/get only, src/cli/resources/sessions.ts:45).
 <!-- SECTION:NOTES:END -->

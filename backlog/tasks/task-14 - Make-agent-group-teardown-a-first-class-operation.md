@@ -39,7 +39,7 @@ Gaps found while planning this cleanup, none of which the script covers:
     misses it and the sessions DELETE can hit an FK error. Zero rows today, so it has not bitten yet.
   - Running containers are not killed before the rows disappear.
   - Per-group docker image tags nanoclaw-agent-v2-<hash>:<group-id> are left behind.
-  - The OneCLI agent auto-created by ensureAgent (src/container-runner.ts:385) and its secret assignments
+  - The OneCLI agent auto-created by ensureAgent (src/container-runner.ts:429) and its secret assignments
     are never removed, so the vault accumulates orphan agents holding real credentials.
   - Messaging groups left with no wiring at all.
   - Prose references in surviving groups' CLAUDE.md / CLAUDE.local.md. Not automatable, but a warning

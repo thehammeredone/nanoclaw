@@ -4,7 +4,7 @@ title: Decommission the local-qwen3.6 agent group
 status: To Do
 assignee: []
 created_date: '2026-07-31 02:51'
-updated_date: '2026-07-31 03:18'
+updated_date: '2026-08-20 22:30'
 labels:
   - ollama
 dependencies: []
@@ -46,4 +46,19 @@ still needed. Rewrite rather than delete.
 
 <!-- SECTION:NOTES:BEGIN -->
 Provenance: Claude Code session 9934a222-4185-48a6-8de2-07b8bbe71cf7 (2026-07-30). Discovery data and reasoning: docs/work-records/2026-07-30-decommission-planning-aurora-discord-wiring-and-four-agent-groups.md and docs/state-discovery.md
+
+CORRECTION 2026-08-20 (orchestrator session fe8a8e37), verified against source:
+
+'The directory has to be removed by hand; a DB-driven sweep will not find it' is false.
+scripts/delete-cli-agent.ts:70-72 keys its removal on the AGENT GROUP ID, not on sessions rows:
+  const sessionsDir = path.join(DATA_DIR, 'v2-sessions', ag.id);
+  fs.rmSync(sessionsDir, { recursive: true });
+and it resolves ag via getAgentGroupByFolder(--folder). local-qwen3.6 still has its
+agent_groups row (103c34dd-8610-4bd6-9fa0-b9b98f79941d, folder 'local-qwen3.6'), so
+'pnpm exec tsx scripts/delete-cli-agent.ts --folder local-qwen3.6' removes the session
+directory along with groups/local-qwen3.6/.
+
+The ordering constraint that does matter: it looks the group up by folder, so it must run
+BEFORE the agent_groups row is deleted, not after. docs/state-discovery.md:205-209 already
+describes this behavior correctly.
 <!-- SECTION:NOTES:END -->
