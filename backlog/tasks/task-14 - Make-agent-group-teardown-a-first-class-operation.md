@@ -4,7 +4,7 @@ title: Make agent-group teardown a first-class operation
 status: To Do
 assignee: []
 created_date: '2026-07-31 02:51'
-updated_date: '2026-07-31 03:18'
+updated_date: '2026-08-20 23:30'
 labels:
   - docs
 dependencies: []
@@ -66,4 +66,22 @@ needs to exist somewhere.
 
 <!-- SECTION:NOTES:BEGIN -->
 Provenance: Claude Code session 9934a222-4185-48a6-8de2-07b8bbe71cf7 (2026-07-30). Discovery data and reasoning: docs/work-records/2026-07-30-decommission-planning-aurora-discord-wiring-and-four-agent-groups.md and docs/state-discovery.md
+
+INPUT FROM TASK-8 EXECUTION 2026-08-20 (orchestrator session fe8a8e37):
+
+A teardown tool must handle ROOT-OWNED DOCKER MOUNT STUBS. Every retired session dir
+contained an empty 'extra/skylight' directory owned by root:root -- a bind-mount target
+Docker auto-created. A plain 'rm -rf' as the host user FAILS on these and leaves orphan
+skeletons behind. With passwordless sudo unavailable, the workaround was to mount each
+session dir into a throwaway 'alpine:3' container as uid 0 and rm -rf from inside.
+
+Any generic teardown implementation needs this step, or it will silently leave directories
+behind and report success. Also worth an explicit refusal guard keyed on the sessions being
+KEPT -- the TASK-8 loop carried one so the surviving Matrix session dir could not be hit.
+
+Verified deletion order from pragma_foreign_key_list (all NO ACTION):
+  inbound -> sessions:         pending_approvals.session_id, pending_questions.session_id
+  inbound -> messaging_groups: messaging_group_agents, sessions, pending_channel_approvals,
+                               pending_sender_approvals, user_dms
+  NO FK (must be hunted):      unregistered_senders.messaging_group_id
 <!-- SECTION:NOTES:END -->

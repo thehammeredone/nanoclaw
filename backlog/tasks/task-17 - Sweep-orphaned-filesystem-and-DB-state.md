@@ -4,7 +4,7 @@ title: Sweep orphaned filesystem and DB state
 status: To Do
 assignee: []
 created_date: '2026-07-31 03:19'
-updated_date: '2026-08-20 22:30'
+updated_date: '2026-08-20 23:30'
 labels:
   - hygiene
 dependencies: []
@@ -51,4 +51,15 @@ scripts/delete-cli-agent.ts DOES remove data/v2-sessions/<agent-group-id>/ -- it
 rm on ag.id (delete-cli-agent.ts:70-72), not on sessions rows. It must run before the
 agent_groups row is deleted, since it resolves the group by --folder. Orphaned session dirs
 are only unreachable for groups whose agent_groups row is ALREADY gone.
+
+INPUT FROM TASK-8 EXECUTION 2026-08-20 (orchestrator session fe8a8e37):
+
+Add root-owned Docker mount stubs to the sweep. Retired session dirs contain empty
+bind-mount targets (e.g. 'extra/skylight') owned by root:root that Docker auto-created.
+A host-user 'rm -rf' cannot remove them, so a naive sweep leaves orphan skeletons and
+reports success. See the TASK-14 note for the alpine-container workaround used in TASK-8.
+
+Also: TASK-8 deleted an unregistered_senders row that no FK would have caught
+(unregistered_senders.messaging_group_id has no FK, and its agent_group_id has none either).
+That table is the most likely source of surviving orphan rows.
 <!-- SECTION:NOTES:END -->
