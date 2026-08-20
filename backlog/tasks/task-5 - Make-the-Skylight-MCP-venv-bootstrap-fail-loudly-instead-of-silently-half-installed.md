@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-07-29 13:49'
-updated_date: '2026-08-20 22:30'
+updated_date: '2026-08-20 23:06'
 labels:
   - aurora
   - skylight
@@ -57,4 +57,49 @@ By contrast the Matrix session's .skylight-venv-0.2.3 is complete (fastmcp, play
 Consequence: every morning report from Aug 16 onward failed. Because the MCP server dies on import before registering, there is no tool error to quote -- the agent correctly reports 'Skylight MCP server disconnected' and cannot say why. Outbound seq 437/439/441 (Aug 16, 19, 20) are all degraded reports. Two rounds of CLAUDE.local.md 'fixes' were written against this, both targeting auth, neither addressing a dead process. See TASK-24.
 
 Raising priority medium -> high.
+
+RESOLVED 2026-08-20 (orchestrator session fe8a8e37). Two commits + one fix round.
+
+The guard is now: a .provisioned sentinel inside the venv dir, written ONLY after a
+post-install import check passes. Failure paths call fail() which exits 1 rather than
+falling through to 'exec python -m server' -- that fall-through is what turned a
+provisioning failure into a misleading ModuleNotFoundError. pip's -q is dropped and all
+provisioning chatter goes to stderr so the MCP stdio JSON-RPC channel stays clean.
+
+REVIEW CAUGHT A CRITICAL DEFECT in the first implementation. The probe was
+'import server', but Skylight's server/__init__.py has ZERO module-level imports (docstring,
+__all__, and a lazy __getattr__). So it passed on a venv holding the wheel and none of its
+71 deps, then wrote a sentinel making that state permanent -- strictly worse than the
+original bug, since recovery would also require knowing to delete the sentinel.
+Corrected to 'import server.app', where 'from fastmcp import FastMCP' actually lives.
+Verified in the real image: passes on the healthy 161-pkg venv (rc=0), fails on a
+dependency-less 9-pkg venv (rc=1, ModuleNotFoundError: No module named 'fastmcp').
+
+Also found during review: 'python -m server' puts cwd ahead of site-packages on sys.path,
+so the server that actually executes is the READ-ONLY SOURCE MOUNT at
+/workspace/extra/skylight, not the wheel copy in the venv. The venv only ever supplied
+dependencies. The probe now runs from that same cwd so it validates what actually runs.
+
+Other fixes in the same pass: rm -f the sentinel BEFORE rm -rf the venv (crash/concurrency
+safety); a separate die() for post-provisioning failures so a missing mount no longer
+advises rm -rf of a healthy 100MB venv; mkdir guarded; seeder VER 0.2.1 -> 0.2.3 (re-running
+it would have silently downgraded Aurora).
+
+THE LOGIC NOW LIVES IN THREE PLACES that must stay in sync, verified byte-identical
+(whitespace-normalized) at merge time: the live container_configs.mcp_servers column
+(authoritative), scripts/setup-aurora-agent.ts (the seeder), and the runbook's quoted block.
+
+Outage remediation: removed the two half-built venvs
+(sess-1782319186963-b2yjgn/.skylight-venv-0.2.3 -- the 6am cron session, and
+sess-1782785033830-whzaig/.skylight-venv-0.2.1). Both were the failed-install signature.
+They rebuild automatically on next launch. Did NOT run 'ncl groups restart' -- that would
+push a live message to Aurora.
+
+Hammer's live Matrix session venv (sess-1783609624398-smn6q9/.skylight-venv-0.2.3, 161 pkgs)
+was hand-seeded with a sentinel rather than forced through a needless ~100MB rebuild, after
+the CORRECTED probe was confirmed to pass against it.
+
+Left alone deliberately: sess-1782319186963-b2yjgn/.skylight-venv-0.2.1 (16 pkgs, a likely
+third half-built venv). It is an old version the current line never references -- sweep it
+with TASK-6.
 <!-- SECTION:NOTES:END -->
