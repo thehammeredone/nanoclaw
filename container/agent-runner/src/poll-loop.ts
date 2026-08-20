@@ -26,6 +26,19 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Daily context rollover: a batch containing any scheduled task run starts a
+ * fresh SDK session instead of resuming the long-lived transcript. Reports
+ * (Aurora, Radar, etc.) would otherwise resume the same session forever —
+ * unbounded context growth and a CLAUDE.local.md that's only read once, at
+ * the transcript's original startup. Mixed batches use `.some()`, not
+ * `.every()`: if a same-poll chat message rides along into the fresh
+ * session, that's an acceptable trade for keeping this simple.
+ */
+export function shouldRunFresh(messages: Pick<MessageInRow, 'kind'>[]): boolean {
+  return messages.some((m) => m.kind === 'task');
+}
+
 export interface PollLoopConfig {
   provider: AgentProvider;
   /**
@@ -167,9 +180,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    // Daily context rollover: run task batches without resume so scheduled
+    // reports get a fresh session (bounded context, re-read CLAUDE.local.md).
+    // See shouldRunFresh() above.
+    const runFresh = shouldRunFresh(keep);
+    if (runFresh) {
+      log('Batch contains a task-kind row — running without resume (fresh session)');
+    }
+
     const query = config.provider.query({
       prompt,
-      continuation,
+      continuation: runFresh ? undefined : continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
     });
