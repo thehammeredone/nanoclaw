@@ -1,10 +1,11 @@
 ---
 id: TASK-7
 title: Move Aurora morning-report schedule off the Discord session
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-31 02:49'
-updated_date: '2026-08-20 15:09'
+updated_date: '2026-08-20 23:17'
 labels:
   - blocker
 dependencies: []
