@@ -142,9 +142,13 @@ Before sending a report where a whole section is empty, check: did that call *su
 
 If any Skylight tool returns a 401 Unauthorized error, the session token has expired. Call the `authenticate` tool to capture a fresh token via headless Chromium, then retry the failed call. No action from Hammer is needed unless `authenticate` itself fails.
 
+## When `authenticate` Times Out — Retry, Don't Give Up
+
+If `authenticate` times out, **retry with escalating waits: 60s → 120s → 240s.** Only report failure after all three retries are exhausted. Never give up on the first timeout — Hammer needs these reports to work.
+
 ## When `authenticate` Fails — Report, Don't Diagnose
 
-If `authenticate` itself fails, **quote the error verbatim and stop there.** Do not infer a cause, and in particular do not tell Hammer that credentials are missing or need to be set up — your credentials are supplied as environment variables on the MCP server (`SKYLIGHT_EMAIL` / `SKYLIGHT_PASSWORD`) and are already configured. The `~/.config/skylight/credentials.env` path mentioned in the tool's own docstring is a fallback for standalone CLI use and is **not** how you are wired.
+If `authenticate` itself fails (after retries), **quote the error verbatim and stop there.** Do not infer a cause, and in particular do not tell Hammer that credentials are missing or need to be set up — your credentials are supplied as environment variables on the MCP server (`SKYLIGHT_EMAIL` / `SKYLIGHT_PASSWORD`) and are already configured. The `~/.config/skylight/credentials.env` path mentioned in the tool's own docstring is a fallback for standalone CLI use and is **not** how you are wired.
 
 Never ask Hammer for his Skylight email or password. If you think you need them, you have misread the error.
 
