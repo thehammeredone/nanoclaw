@@ -1,10 +1,10 @@
 ---
 id: TASK-4
 title: Resume Matrix homeserver setup for Aurora
-status: In Progress
+status: Needs Review
 assignee: []
 created_date: '2026-07-09 14:31'
-updated_date: '2026-07-26 22:15'
+updated_date: '2026-08-20 22:19'
 labels:
   - matrix
   - aurora
@@ -60,4 +60,28 @@ Remaining: Step 6 (Ann's iPhone) unchanged - still needs physical device setup. 
 2026-07-26: Host had been down since 2026-07-10 (~16 days, no crash - box was just off); restarted cleanly, Matrix reconnected on the first try. Found and fixed a real bug in the DM-resolution wrapper (`src/channels/matrix.ts`): `catchUpMissedMessages` calls `fetchChannelMessages` with the user-handle platform_id, but only `postMessage`/`startTyping`/`channelIdFromThreadId` were wrapped to resolve that to a real room ID - `fetchChannelMessages` wasn't, so every restart's catch-up 403'd on both hammer's and ann's DMs. Fixed by wrapping `fetchChannelMessages` the same way; verified via restart that both DMs now catch up cleanly. Also: Skylight auth moved to persistent email/password (see commit 839d03c), so the token-expiry gap noted above is resolved going forward. Aurora's report-formatting prompt (`groups/skylight-morning/CLAUDE.local.md`) also got a substantial accuracy pass this cycle - calendar timezone/window filtering, chores category switched from "Mom" to "Dad", weather rain-range grouping, added a "Tomorrow's Calendar" section.
 
 Step 6 now has two remaining hand-off items, not one: Ann's iPhone (Element) and, newly added, Hammer's own Android phone (Element) - his DM has been tested end-to-end via API/host but no mobile client has ever been signed in. See runbook Step 6a/6b for both.
+
+PARKED 2026-08-20 by the backlog orchestrator (session fe8a8e37).
+
+Steps 1-5 are complete and verified against the live central DB:
+- Homeserver reachable at thehammeredone.ddns.net; the Let's Encrypt / DNS / port-forward
+  blocker that stalled Step 1 is resolved (accounts resolve on that domain).
+- Matrix adapter installed at src/channels/matrix.ts and self-registered in
+  src/channels/index.ts.
+- Both DM messaging groups exist:
+    mg-1783608739461-4om0w9        matrix:@hammer:thehammeredone.ddns.net
+    f2cfdd4d-bc63-4ce1-8a0e-cddf3626a394  matrix:@ann:thehammeredone.ddns.net  'Ann DM'
+- Both wired to Aurora (ag-1782273071167-th1q6f), session_mode=shared:
+    35671fb9-b06c-4e77-a6b3-5d3d3e7bba34  -> hammer DM
+    95b041ba-7a62-4d03-82a6-c961bb1f76af  -> Ann DM
+- Hammer's session sess-1783609624398-smn6q9 is live (last_active 2026-08-20T11:19:53Z).
+
+Only Step 6 remains: Ann sets up Element on her iPhone, Hammer on Android, and each is
+end-to-end tested on wifi and cellular push. Ann's wiring has never instantiated a session,
+which is consistent with Element not yet being set up on her device.
+
+This cannot be automated -- it needs two physical phones and Ann. Moved out of 'In Progress'
+to 'Needs Review' so the orchestrator's next-task selector (orchestrate.py:157 returns any
+In Progress task as 'resume', with no blocked state) can advance past it instead of
+deadlocking the run. Move it back to 'To Do'/'In Progress' when the devices are in hand.
 <!-- SECTION:NOTES:END -->
