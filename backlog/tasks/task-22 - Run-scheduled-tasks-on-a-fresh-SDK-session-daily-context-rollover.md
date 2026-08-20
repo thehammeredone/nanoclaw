@@ -1,9 +1,11 @@
 ---
 id: TASK-22
 title: Run scheduled tasks on a fresh SDK session (daily context rollover)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-20 15:00'
+updated_date: '2026-08-20 23:57'
 labels:
   - aurora
   - radar
