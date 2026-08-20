@@ -1,10 +1,11 @@
 ---
 id: TASK-9
 title: Purge memory and coder references from the surviving agents
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-31 02:50'
-updated_date: '2026-08-20 22:30'
+updated_date: '2026-08-20 23:43'
 labels:
   - aurora
 dependencies: []
@@ -42,13 +43,25 @@ Also worth deciding: Mjollnir's behavioral profile currently lives in groups/mem
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Mjollnir CLAUDE.local.md no longer instructs querying memory or coder
-- [ ] #2 Aurora CLAUDE.local.md Memory Agent section removed
-- [ ] #3 All three inbound agent_destinations rows removed
-- [ ] #4 Per-session destinations tables in surviving sessions no longer list memory or coder
-- [ ] #5 scripts/send-to-memory.ts deleted
-- [ ] #6 Anything worth keeping from wiki/behaviors/mjollnir.md moved into Mjollnir's own instructions, or explicitly dropped
+- [x] #1 Mjollnir CLAUDE.local.md no longer instructs querying memory or coder
+- [x] #2 Aurora CLAUDE.local.md Memory Agent section removed
+- [x] #3 All three inbound agent_destinations rows removed
+- [x] #4 Per-session destinations tables in surviving sessions no longer list memory or coder
+- [x] #5 scripts/send-to-memory.ts deleted
+- [x] #6 Anything worth keeping from wiki/behaviors/mjollnir.md moved into Mjollnir's own instructions, or explicitly dropped
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -81,4 +94,58 @@ So every session's inbound.db destinations table is rebuilt from the central age
 rows on each spawn. Fixing the central rows is sufficient; hand-editing live inbound.db files
 is unnecessary and will be overwritten anyway. AC #4 should pass trivially once the central
 rows are correct.
+
+RESOLVED 2026-08-20 (orchestrator session fe8a8e37). One review round.
+
+Central agent_destinations: all three target_type='agent' rows deleted by exact tuple.
+ZERO agent-type destinations remain anywhere; the 5 surviving rows are all channel-type,
+including Aurora's hammer + ann (untouched).
+
+Prose purged from THREE files, not the two the ACs named:
+  groups/dm-with-hammer/CLAUDE.local.md   (Mjollnir)       -57 lines
+  groups/skylight-morning/CLAUDE.local.md (Aurora)         -29 lines
+  groups/_ping-test/CLAUDE.local.md       (Terminal Agent) -56 lines
+  scripts/send-to-memory.ts                                 deleted
+
+REVIEW CAUGHT A GAP THE ACs MISSED. The ACs named only Mjollnir and Aurora, but the task's
+own description names Terminal Agent's memory destination row -- which this task deleted.
+Its instruction file still carried the mandatory 'query memory before responding' block and
+the full Memory Agent section. That left the two halves contradictory: on next spawn the
+agent boots with a system prompt advertising only 'local-cli' (writeDestinations rewrites
+the table at container-runner.ts:119-121) while its own instructions insist it must send to
+'memory' before any other work and wait for a reply. Every turn would have opened with
+'Unknown destination "memory". Known: local-cli'. Fixed.
+
+Also merged Mjollnir's two overlapping reply-routing rules into one paragraph.
+
+AC#6: the wiki's single behavioral correction ('reply to thread, not DM', 2026-05-25) was
+folded into Mjollnir's Reply Routing section in the agent's own imperative voice rather than
+pasted with its Date/Correction/Context wiki scaffolding. groups/memory/ itself untouched
+(TASK-10's scope).
+
+AC#4 TICKED BY MECHANISM, NOT BY LITERAL STATE. All 13 surviving sessions (12 Mjollnir,
+1 Terminal Agent) still list memory/coder in their inbound.db destinations tables right now.
+They are corrected automatically at next spawn: spawnContainer calls writeDestinations
+unconditionally (src/container-runner.ts:119-121), which calls replaceDestinations -- a
+transactional DELETE FROM destinations + re-insert with no early return on an empty set
+(src/db/session-db.ts:66-76). Verified no Mjollnir or Terminal Agent container is currently
+running, so no stale-read window is open. Belt and braces: routeAgentMessage re-validates
+against the CENTRAL table (agent-route.ts:167-174) and throws 'unauthorized agent-to-agent',
+so even a stale local row cannot produce a successful send. The central deletion is the
+load-bearing fix.
+
+OPERATIONAL FOLLOW-UP (not actioned here): CLAUDE.local.md is injected once per SDK session.
+Every one of the 13 affected sessions has a continuation:claude row, so none of these prose
+edits take effect until those continuations are cleared. Clearing them is the remaining step
+before the behaviour actually changes.
+
+NOTE FOR TASK-10: this purge removes the only mechanism by which behaviour corrections were
+persisted anywhere in this install. That is presumably intended, but it should be a
+deliberate decision rather than a side effect.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Removed every reference to the dead memory and coder agents from the surviving agents. Deleted all three inbound agent_destinations rows (zero target_type='agent' rows now remain install-wide) and purged the mandatory 'query memory before responding' instruction plus the full Memory Agent section from Mjollnir, Aurora, AND Terminal Agent - the last of which the acceptance criteria did not name, but whose destination row this same task deleted, leaving its instructions contradicting its own system prompt. Salvaged the wiki's single behavioural correction into Mjollnir's instructions. Deleted scripts/send-to-memory.ts. AC#4 is satisfied by mechanism: spawnContainer unconditionally rewrites each session's destinations table from the central rows, and agent-to-agent routing re-validates centrally, so stale per-session copies cannot produce a successful send. 339 tests pass, tsc clean.
+<!-- SECTION:FINAL_SUMMARY:END -->
