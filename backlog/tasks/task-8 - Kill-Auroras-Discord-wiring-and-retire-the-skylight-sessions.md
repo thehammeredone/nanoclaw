@@ -1,10 +1,11 @@
 ---
 id: TASK-8
 title: Kill Aurora's Discord wiring and retire the skylight sessions
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-31 02:49'
-updated_date: '2026-08-20 22:30'
+updated_date: '2026-08-20 23:19'
 labels:
   - cleanup
 dependencies:
