@@ -3,11 +3,11 @@ id: TASK-5
 title: >-
   Make the Skylight MCP venv bootstrap fail loudly instead of silently
   half-installed
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-07-29 13:49'
-updated_date: '2026-08-20 23:06'
+updated_date: '2026-08-20 23:07'
 labels:
   - aurora
   - skylight
@@ -40,10 +40,16 @@ Note this shell line lives in a DB column, not in any file under version control
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A failed pip install does not leave a venv directory that satisfies the guard on the next launch
-- [ ] #2 The failure surfaces as a provisioning error, not as a downstream ModuleNotFoundError
-- [ ] #3 Recovery steps are documented in docs/runbooks/aurora-skylight-mcp.md
+- [x] #1 A failed pip install does not leave a venv directory that satisfies the guard on the next launch
+- [x] #2 The failure surfaces as a provisioning error, not as a downstream ModuleNotFoundError
+- [x] #3 Recovery steps are documented in docs/runbooks/aurora-skylight-mcp.md
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -103,3 +109,9 @@ Left alone deliberately: sess-1782319186963-b2yjgn/.skylight-venv-0.2.1 (16 pkgs
 third half-built venv). It is an old version the current line never references -- sweep it
 with TASK-6.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Replaced the [ -d venv ] || guard with a .provisioned sentinel written only after an 'import server.app' check passes, so a half-built venv is treated as absent and rebuilt. Provisioning failures now exit non-zero with a message naming the venv and wheel instead of falling through to exec, which is what produced the misleading ModuleNotFoundError. pip's -q dropped; all provisioning output on stderr to keep the MCP JSON-RPC channel clean. Applied to the live container_configs.mcp_servers column, the version-controlled seeder, and the runbook, verified byte-identical modulo VER=. Removed the two half-built venvs behind the active outage. Review caught that the original 'import server' probe could not detect a dependency-less venv (server/__init__.py has no module-level imports) and would have made that state permanent -- corrected and verified discriminating in the real container image.
+<!-- SECTION:FINAL_SUMMARY:END -->
