@@ -1,10 +1,11 @@
 ---
 id: TASK-9
 title: Purge memory and coder references from the surviving agents
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-31 02:50'
-updated_date: '2026-08-20 22:30'
+updated_date: '2026-08-20 23:31'
 labels:
   - aurora
 dependencies: []
