@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-29 13:50'
+updated_date: '2026-08-20 15:02'
 labels:
   - aurora
   - skylight
@@ -41,3 +42,15 @@ Related: docs/isolation-model.md, src/session-manager.ts (mount/heartbeat paths)
 - [ ] #3 Concurrent-write behavior on the shared token file is confirmed safe or guarded
 - [ ] #4 Stale per-session venvs from the current layout are cleaned up
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AMENDED 2026-08-20 (session 9bcadaf6-...). Partly re-scoped by two later decisions:
+
+1. TASK-23 splits Ann onto her own agent group (1-to-1 agent<->destination). That INCREASES the duplication this task describes -- two agent groups, two container images, two venvs -- so shared provisioning gets more valuable, not less.
+
+2. Current venv inventory on disk (Aurora, 2026-08-20): b2yjgn has .skylight-env, -venv-0.2.1, -0.2.2, -0.2.3 (four); smn6q9 has -0.2.1, -0.2.2, -0.2.3 (three); whzaig and ah2yj4 have -0.2.1 each. Nine venv trees total. TASK-8 deletes three of those sessions outright, reclaiming most of it, so sequence this AFTER TASK-8 to avoid optimising storage that is about to be deleted.
+
+3. Token-sharing half of this task is now lower value: with TASK-23 splitting the groups, per-group tokens are arguably CORRECT (separate people, separate Skylight scoping) even if the venv should still be shared. Re-scope before starting: the venv and the token halves may want to split into separate tasks.
+<!-- SECTION:NOTES:END -->

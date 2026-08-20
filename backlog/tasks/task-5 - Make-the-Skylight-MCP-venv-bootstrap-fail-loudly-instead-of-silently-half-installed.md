@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-29 13:49'
+updated_date: '2026-08-20 15:02'
 labels:
   - aurora
   - skylight
@@ -14,7 +15,7 @@ labels:
 dependencies: []
 references:
   - docs/runbooks/aurora-skylight-mcp.md
-priority: medium
+priority: high
 ordinal: 5000
 ---
 
@@ -42,3 +43,17 @@ Note this shell line lives in a DB column, not in any file under version control
 - [ ] #2 The failure surfaces as a provisioning error, not as a downstream ModuleNotFoundError
 - [ ] #3 Recovery steps are documented in docs/runbooks/aurora-skylight-mcp.md
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AMENDED 2026-08-20 (session 9bcadaf6-3351-4862-8bee-85cc8b8f9834). This is no longer hypothetical -- it has now fired TWICE and is the root cause of an active outage.
+
+Second occurrence: session sess-1782319186963-b2yjgn (Aurora's Discord-wired session, which hosts the 6am cron) has .skylight-venv-0.2.3/ containing ONLY _distutils_hack, pip, pkg_resources, setuptools. No skylight, no server module, no playwright, none of the ~60 deps. Directory timestamped Aug 16 19:42.
+
+By contrast the Matrix session's .skylight-venv-0.2.3 is complete (fastmcp, playwright 1.62.0, server, skylight-0.2.3.dist-info + 60 dist-infos).
+
+Consequence: every morning report from Aug 16 onward failed. Because the MCP server dies on import before registering, there is no tool error to quote -- the agent correctly reports 'Skylight MCP server disconnected' and cannot say why. Outbound seq 437/439/441 (Aug 16, 19, 20) are all degraded reports. Two rounds of CLAUDE.local.md 'fixes' were written against this, both targeting auth, neither addressing a dead process. See TASK-24.
+
+Raising priority medium -> high.
+<!-- SECTION:NOTES:END -->

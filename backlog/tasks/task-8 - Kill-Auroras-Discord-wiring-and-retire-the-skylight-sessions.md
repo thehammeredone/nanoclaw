@@ -4,7 +4,7 @@ title: Kill Aurora's Discord wiring and retire the skylight sessions
 status: To Do
 assignee: []
 created_date: '2026-07-31 02:49'
-updated_date: '2026-07-31 03:18'
+updated_date: '2026-08-20 15:09'
 labels:
   - cleanup
 dependencies:
@@ -57,5 +57,15 @@ Sequencing notes:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Provenance: Claude Code session 9934a222-4185-48a6-8de2-07b8bbe71cf7 (2026-07-30). Discovery data and reasoning: docs/work-records/2026-07-30-decommission-planning-aurora-discord-wiring-and-four-agent-groups.md and docs/state-discovery.md
+AMENDED 2026-08-20 (session 9bcadaf6-3351-4862-8bee-85cc8b8f9834).
+
+SUPERSEDED: the description says 'Aurora KEEPS both Matrix wirings and both Matrix destinations.' The operator has since established a one-agent-group-per-destination rule. Aurora keeps ONLY the @hammer DM (wiring 35671fb9). Ann's DM (wiring 95b041ba) moves to a cloned agent group -- TASK-23, deferred until Aurora is fixed.
+
+So the end state is:
+  Aurora  ag-1782273071167-th1q6f  -> @hammer DM only, destinations: hammer
+  new group (TASK-23)              -> @ann DM only,    destinations: ann
+
+Sequencing: this task may still delete the Discord wiring and the three Discord sessions without waiting on TASK-23. Do NOT delete wiring 95b041ba here -- leave Ann pointed at Aurora until the clone exists, or Ann loses service in the gap. Dropping 'ann' from Aurora's destinations belongs to TASK-23, not here.
+
+Confirmed still accurate on 2026-08-20: the three Discord sessions are b2yjgn (holds the cron), whzaig, ah2yj4; Ann has never had a session at all, so nothing of hers is at risk in this teardown.
 <!-- SECTION:NOTES:END -->

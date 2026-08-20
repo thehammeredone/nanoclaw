@@ -4,7 +4,7 @@ title: Move Aurora morning-report schedule off the Discord session
 status: To Do
 assignee: []
 created_date: '2026-07-31 02:49'
-updated_date: '2026-07-31 03:18'
+updated_date: '2026-08-20 15:09'
 labels:
   - blocker
 dependencies: []
@@ -49,5 +49,16 @@ Related: TASK-6 already documents that b2yjgn is the session that produces the s
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Provenance: Claude Code session 9934a222-4185-48a6-8de2-07b8bbe71cf7 (2026-07-30). Discovery data and reasoning: docs/work-records/2026-07-30-decommission-planning-aurora-discord-wiring-and-four-agent-groups.md and docs/state-discovery.md
+AMENDED 2026-08-20 (session 9bcadaf6-3351-4862-8bee-85cc8b8f9834). Two corrections and an urgency change.
+
+CORRECTION -- the delivery premise in the description is wrong. This task implies the brief is posting OUTBOUND to Discord #skylight. It is not, and never was. Session b2yjgn's destinations table contains exactly two rows:
+  ann    | channel | matrix | matrix:@ann:thehammeredone.ddns.net
+  hammer | channel | matrix | matrix:@hammer:thehammeredone.ddns.net
+Both Matrix. Discord is only the INBOUND wiring and the session's routing identity. So the reports have been reaching Matrix correctly this whole time. Moving the schedule is about ownership and surviving TASK-8's teardown -- NOT about fixing a misdelivered report. AC#1 still stands; the reasoning behind it changes.
+
+The host-sweep point in the description remains correct and load-bearing: host-sweep iterates getActiveSessions() and never consults messaging_group_agents, so deleting the wiring alone leaves the schedule firing.
+
+URGENCY -- this is now an active outage, not hygiene. b2yjgn's Skylight venv is broken (see TASK-5); every report since 2026-08-16 has been degraded. Moving the schedule to the Matrix session sess-1783609624398-smn6q9, whose venv is intact, RESOLVES THE OUTAGE as a side effect. That makes this the fastest path back to working reports and it should run before TASK-5's permanent guard fix.
+
+INTERACTION with TASK-22 -- once scheduled tasks run on fresh SDK sessions, recreating this schedule is also the moment the frozen-prompt problem stops mattering as much, but the recurrence content is still copied verbatim by insertRecurrence. Write the new schedule's prompt to defer entirely to CLAUDE.local.md (the current one already does) and keep credentials out of it per AC#4 / TASK-19.
 <!-- SECTION:NOTES:END -->
