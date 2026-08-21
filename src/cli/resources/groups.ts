@@ -57,7 +57,16 @@ registerResource({
     },
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
   ],
-  operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'approval' },
+  /**
+   * `delete` is `open`, not `approval`, purely because `deleteHandler` below
+   * always refuses. `dispatch()` requests approval BEFORE invoking a handler
+   * (`src/cli/dispatch.ts`), so leaving this at `approval` would DM a human
+   * admin a request that reads like agent self-destruction ("Agent X wants to
+   * run: ncl groups delete --id <its own group>", because `cli_scope: group`
+   * auto-fills `--id`) — and then throw anyway once approved. There is nothing
+   * to approve, so the refusal short-circuits ahead of the round-trip.
+   */
+  operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'open' },
   /**
    * Deleting an agent group is a multi-step teardown, not a row delete.
    * `genericDelete` would issue a bare `DELETE FROM agent_groups` with

@@ -21,6 +21,26 @@ describe('ncl groups delete', () => {
     await expect(cmd!.handler({ id: 'ag-example' }, ctx)).rejects.toThrow(/foreign keys/);
   });
 
+  it('still refuses for an agent caller, without touching approvals', async () => {
+    const agentCtx = {
+      caller: 'agent',
+      agentGroupId: 'ag-example',
+      sessionId: 'sess-1',
+    } as unknown as CallerContext;
+    await expect(lookup('groups-delete')!.handler({ id: 'ag-example' }, agentCtx)).rejects.toThrow(
+      /scripts\/delete-agent-group\.ts/,
+    );
+  });
+
+  it('refuses without an approval round-trip', () => {
+    // `dispatch()` requests approval BEFORE invoking the handler, so an
+    // `approval` access level here would DM a human admin what reads as an
+    // agent-self-destruct request (`cli_scope: group` auto-fills --id to the
+    // caller's own group) and then throw anyway once approved. There is
+    // nothing to approve.
+    expect(lookup('groups-delete')!.access).toBe('open');
+  });
+
   it('does not disturb genericDelete for other resources', async () => {
     // wirings still uses the generic path — proven by its id-required error,
     // which genericDelete raises before touching the DB.

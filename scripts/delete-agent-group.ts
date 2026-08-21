@@ -9,19 +9,32 @@
  * that must not be automated (prose references, orphans, stale mirrors).
  *
  * Safe by default: prints a plan and changes nothing unless `--yes` is given.
- * Idempotent: re-run after a partial failure with `--id`.
+ * Re-runnable: a second run re-plans against whatever is left ("residual
+ * mode"). Residual mode cannot recover the folder from the DB, so pass
+ * `--folder <name>` alongside `--id` to finish removing `groups/<folder>/`.
  *
  * Usage:
  *   pnpm exec tsx scripts/delete-agent-group.ts --id <agent-group-id>          # plan
  *   pnpm exec tsx scripts/delete-agent-group.ts --folder <folder>              # plan
  *   pnpm exec tsx scripts/delete-agent-group.ts --id <agent-group-id> --yes    # execute
+ *   pnpm exec tsx scripts/delete-agent-group.ts --id <id> --folder <name> --yes  # resume
  *
  * Flags:
  *   --id <id>        Agent group id. Works even when the row is already gone.
- *   --folder <name>  Resolve by groups/<folder>. Requires the row to still exist.
+ *   --folder <name>  Resolve by groups/<folder>. Also supplements --id in
+ *                    residual mode, where the folder is otherwise unknown.
  *   --yes            Actually execute the plan.
  *   --keep-onecli    Leave the OneCLI vault agent alone.
  *   --keep-images    Leave the per-group docker image tag alone.
+ *
+ * Exit codes:
+ *   0  plan printed (dry run), or executed with every step complete
+ *   1  usage error, or the target could not be resolved (nothing ran)
+ *   2  executed but INCOMPLETE — the DB half committed, but at least one of
+ *      the group directory, session directory, image tag, container stop or
+ *      OneCLI vault agent was not dealt with. Read the INCOMPLETE block and
+ *      re-run. Never treat 2 as success: a surviving OneCLI agent still holds
+ *      injectable credentials for a group that no longer exists.
  *
  * Deletion order and FK evidence: docs/runbooks/agent-group-teardown.md
  */
@@ -31,6 +44,7 @@ import { CONTAINER_IMAGE_BASE, CONTAINER_INSTALL_LABEL, DATA_DIR, GROUPS_DIR } f
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import {
+  collectIncomplete,
   defaultExec,
   executeTeardown,
   planTeardown,
@@ -38,7 +52,10 @@ import {
   type TeardownEnv,
 } from '../src/teardown/agent-group-teardown.js';
 
-const USAGE = `usage: pnpm exec tsx scripts/delete-agent-group.ts (--id <agent-group-id> | --folder <folder>) [--yes] [--keep-onecli] [--keep-images]`;
+const USAGE =
+  `usage: pnpm exec tsx scripts/delete-agent-group.ts (--id <agent-group-id> | --folder <folder>) [--yes] [--keep-onecli] [--keep-images]\n` +
+  `       pass BOTH --id and --folder to resume a partial teardown (the folder is unrecoverable once the row is gone)\n` +
+  `exit:  0 = plan printed / fully torn down · 1 = usage or resolution error · 2 = executed but incomplete`;
 
 function parseArgs() {
   const argv = process.argv.slice(2);
@@ -122,8 +139,19 @@ if (plan.proseReferences.length > 0) {
 if (plan.orphans.messagingGroups.length > 0) {
   console.log(`Follow up: ${plan.orphans.messagingGroups.length} messaging group(s) now have no wiring.`);
 }
-// Exit 0 even with warnings: the DB teardown is transactional, and the
-// remaining steps (docker, OneCLI) are best-effort and re-runnable. Callers
-// that care read the WARNINGS block. `setup/auto.ts` treats a non-zero exit
-// from the delete-cli-agent shim as a setup failure.
+
+// Exit code must reflect whether the job actually finished — see
+// `collectIncomplete`.
+const incomplete = collectIncomplete(plan, result);
+
+if (incomplete.length > 0) {
+  console.log('');
+  console.log('INCOMPLETE — teardown did not finish');
+  console.log('────────────────────────────────────');
+  for (const line of incomplete) console.log(`  ${line}`);
+  console.log('');
+  console.log('Fix the cause and re-run. Exiting 2.');
+  process.exit(2);
+}
+
 process.exit(0);

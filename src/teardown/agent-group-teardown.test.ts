@@ -5,11 +5,14 @@ import path from 'path';
 import Database from 'better-sqlite3';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
+import { CONTAINER_RUNTIME_BIN } from '../container-runtime.js';
 import { closeDb, initTestDb } from '../db/connection.js';
 import { runMigrations } from '../db/migrations/index.js';
 import {
   agentGroupIdTables,
   assertSafePath,
+  collectIncomplete,
+  findContainers,
   cascadesOnAgentGroup,
   executeTeardown,
   findOrphans,
@@ -144,6 +147,30 @@ describe('assertSafePath', () => {
   });
 });
 
+describe('findContainers', () => {
+  it('flags "could not check" rather than returning an empty list', () => {
+    // No folder: discovery cannot even be attempted.
+    const noFolder = findContainers(env, null);
+    expect(noFolder.names).toEqual([]);
+    expect(noFolder.unknown).toBe(true);
+    expect(noFolder.warnings.join()).toMatch(/NOT stopped/);
+    expect(execCalls).toEqual([]);
+
+    // Runtime binary present but failing — same class of unknown.
+    env.exec = fakeExec({ 'docker ps': { ok: false, stdout: '', stderr: 'command not found' } });
+    const failed = findContainers(env, 'doomed');
+    expect(failed.names).toEqual([]);
+    expect(failed.unknown).toBe(true);
+    expect(failed.warnings.join()).toMatch(/command not found/);
+  });
+
+  it('reports a clean empty result as known-empty', () => {
+    env.exec = fakeExec({ 'docker ps': { ok: true, stdout: '\n', stderr: '' } });
+    const res = findContainers(env, 'doomed');
+    expect(res).toEqual({ names: [], unknown: false, warnings: [] });
+  });
+});
+
 describe('onecliIdentifier', () => {
   it('prefixes ids that start with a digit', () => {
     expect(onecliIdentifier('103c34dd-8610-4bd6')).toBe('ag-103c34dd-8610-4bd6');
@@ -206,6 +233,51 @@ describe('planTeardown', () => {
     expect(plan.residual).toBe(true);
     expect(plan.folder).toBeNull();
     expect(plan.warnings.join('\n')).toMatch(/residual mode/);
+    // The whole point of the warning: without a folder the group directory is
+    // unreachable, so the operator has to be told what to pass.
+    expect(plan.warnings.join('\n')).toMatch(/--folder <name>/);
+  });
+
+  it('accepts --folder alongside --id in residual mode, and only there', () => {
+    fs.mkdirSync(path.join(tmp, 'groups', 'vanished'), { recursive: true });
+    const residual = planTeardown(db, env, { agentGroupId: 'ag-vanished', folder: 'vanished' });
+    expect(residual.residual).toBe(true);
+    expect(residual.folder).toBe('vanished');
+    expect(residual.directories).toContain(path.join(tmp, 'groups', 'vanished'));
+    expect(residual.warnings.join('\n')).toMatch(/operator-supplied --folder/);
+
+    // While the row exists the DB stays authoritative — a mismatched --folder
+    // must not redirect the removal at a surviving group.
+    const live = planTeardown(db, env, { agentGroupId: 'ag-doomed', folder: 'keeper' });
+    expect(live.folder).toBe('doomed');
+    expect(live.directories.join('|')).not.toMatch(/keeper/);
+  });
+
+  it('puts an operator-supplied residual --folder through the path guard', () => {
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-vanished', folder: '../groups/keeper' });
+    expect(plan.folder).toBeNull();
+    expect(plan.warnings.join('\n')).toMatch(/ignoring --folder/);
+    expect(plan.directories.join('|')).not.toMatch(/keeper/);
+    expect(fs.existsSync(path.join(tmp, 'groups', 'keeper'))).toBe(true);
+  });
+
+  it('reports a folder the guard refuses instead of listing it as WILL DELETE', () => {
+    db.prepare(`UPDATE agent_groups SET folder = ? WHERE id = 'ag-doomed'`).run('../groups/keeper');
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    expect(plan.directories.join('|')).not.toMatch(/keeper/);
+    expect(plan.refusedDirectories.map((d) => d.path)).toContain(path.join(tmp, 'groups', 'keeper'));
+    const text = renderPlan(plan);
+    expect(text).toMatch(/REFUSED — filesystem/);
+  });
+
+  it('reports failed container discovery as unknown, never as none', () => {
+    env.exec = fakeExec({ 'docker ps': { ok: false, stdout: '', stderr: 'Cannot connect to the daemon' } });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    expect(plan.containers).toEqual([]);
+    expect(plan.containersUnknown).toBe(true);
+    const text = renderPlan(plan);
+    expect(text).toMatch(/COULD NOT CHECK/);
+    expect(text).not.toMatch(/WILL STOP — running containers\n─+\n {2}\(none\)/);
   });
 
   it('counts the session blockers a sweep would miss', () => {
@@ -369,8 +441,104 @@ describe('executeTeardown', () => {
     const second = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
     expect(second.residual).toBe(true);
     const result = executeTeardown(db, env, second);
-    expect(result.warnings).toEqual([]);
+    // Residual mode cannot discover containers (no folder), and says so — but
+    // nothing was attempted and failed.
+    expect(result.failures).toEqual([]);
     expect(db.prepare(`SELECT id FROM agent_groups`).all()).toEqual([{ id: 'ag-keeper' }]);
+  });
+
+  it('every container shell-out goes through the configured runtime binary', () => {
+    env.exec = fakeExec({
+      'docker ps': { ok: true, stdout: 'nanoclaw-v2-doomed-123\n', stderr: '' },
+      'docker images': { ok: true, stdout: 'nanoclaw-agent-v2-testslug:ag-doomed\n', stderr: '' },
+    });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    executeTeardown(db, env, plan);
+    const runtimeCalls = execCalls.filter((c) => c.cmd !== 'onecli');
+    expect(runtimeCalls.length).toBeGreaterThan(0);
+    // Not the literal string 'docker' — the exported constant, so the Apple
+    // Container swap (which rewrites container-runtime.ts) carries this file.
+    for (const c of runtimeCalls) expect(c.cmd).toBe(CONTAINER_RUNTIME_BIN);
+    expect(runtimeCalls.map((c) => c.args[0])).toEqual(expect.arrayContaining(['ps', 'images', 'stop', 'rmi']));
+  });
+
+  it('records a failed destructive step as a failure, not just a warning', () => {
+    env.exec = fakeExec({
+      'docker ps': { ok: true, stdout: 'nanoclaw-v2-doomed-123\n', stderr: '' },
+      'docker stop': { ok: false, stdout: '', stderr: 'no such container' },
+      'onecli agents list': {
+        ok: true,
+        stdout: JSON.stringify({ data: [{ id: 'one-doomed', name: 'Doomed', identifier: 'ag-doomed' }] }),
+        stderr: '',
+      },
+      'onecli agents delete': { ok: false, stdout: '', stderr: 'gateway down' },
+    });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    const result = executeTeardown(db, env, plan);
+    const failed = result.failures.map((f) => f.step);
+    expect(failed).toContain('stop-container');
+    expect(failed).toContain('delete-onecli-agent');
+    // Failures are also warnings — warnings stay the human-readable superset.
+    expect(result.warnings.join('\n')).toMatch(/gateway down/);
+  });
+
+  it('leaves inbound edges of a different target_type alone', () => {
+    // target_id is polymorphic. A channel edge whose target_id happens to
+    // collide with an agent group id must not be swept by the agent teardown.
+    db.prepare(
+      `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at)
+       VALUES ('ag-keeper', 'coincidence', 'channel', 'ag-doomed', ?)`,
+    ).run(now());
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    expect(plan.inboundDestinations.map((e) => e.local_name)).toEqual(['oracle']);
+    executeTeardown(db, env, plan);
+    expect(db.prepare(`SELECT local_name FROM agent_destinations`).all()).toEqual([{ local_name: 'coincidence' }]);
+  });
+});
+
+// ── Exit-code signal ────────────────────────────────────────────────────────
+
+describe('collectIncomplete (drives the scripts exit code)', () => {
+  beforeEach(() => {
+    seedGroup('ag-doomed', 'Doomed', 'doomed');
+    seedMessagingGroup('mg-solo', 'solo');
+  });
+
+  it('is empty for a clean run', () => {
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    const result = executeTeardown(db, env, plan);
+    expect(collectIncomplete(plan, result)).toEqual([]);
+  });
+
+  it('reports a failed OneCLI delete — a live vault agent for a dead group', () => {
+    env.exec = fakeExec({
+      'onecli agents list': {
+        ok: true,
+        stdout: JSON.stringify({ data: [{ id: 'one-doomed', name: 'Doomed', identifier: 'ag-doomed' }] }),
+        stderr: '',
+      },
+      'onecli agents delete': { ok: false, stdout: '', stderr: 'gateway down' },
+    });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    const result = executeTeardown(db, env, plan);
+    expect(collectIncomplete(plan, result).join('\n')).toMatch(/delete-onecli-agent.*gateway down/);
+  });
+
+  it('reports an unresolvable folder in residual mode and names the fix', () => {
+    // First run removes the row; the folder is now unrecoverable from the DB.
+    const first = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    executeTeardown(db, env, first);
+    fs.mkdirSync(path.join(tmp, 'groups', 'doomed'), { recursive: true }); // survived the rm
+
+    const second = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    const lines = collectIncomplete(second, executeTeardown(db, env, second));
+    expect(lines.join('\n')).toMatch(/--id ag-doomed --folder <name> --yes/);
+    expect(fs.existsSync(path.join(tmp, 'groups', 'doomed'))).toBe(true);
+
+    // ...and supplying it finishes the job, which is the whole point.
+    const third = planTeardown(db, env, { agentGroupId: 'ag-doomed', folder: 'doomed' });
+    expect(collectIncomplete(third, executeTeardown(db, env, third))).toEqual([]);
+    expect(fs.existsSync(path.join(tmp, 'groups', 'doomed'))).toBe(false);
   });
 });
 
@@ -474,6 +642,28 @@ describe('scanProseReferences', () => {
         term: 'Aurora',
         text: 'querying Aurora is mandatory',
       },
+    ]);
+  });
+
+  it('scans per-group skills, not just top-level CLAUDE files', () => {
+    seedGroup('ag-doomed', 'Aurora', 'doomed');
+    seedGroup('ag-keeper', 'Mjollnir', 'keeper');
+    const skillDir = path.join(tmp, 'groups', 'keeper', 'skills', 'morning-report');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), 'name: morning\n\nQuerying Aurora is mandatory.\n');
+    // Bounded on purpose: only SKILL.md, only one level down.
+    fs.writeFileSync(path.join(skillDir, 'notes.md'), 'Aurora again\n');
+    fs.mkdirSync(path.join(tmp, 'groups', 'keeper', 'workspace'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'groups', 'keeper', 'workspace', 'CLAUDE.md'), 'Aurora in a workspace\n');
+
+    const { references } = scanProseReferences(
+      env,
+      { deletedFolder: 'doomed', deletedName: 'Aurora', inboundDestinations: [] },
+      () => null,
+    );
+
+    expect(references).toEqual([
+      { file: path.join(skillDir, 'SKILL.md'), line: 3, term: 'Aurora', text: 'Querying Aurora is mandatory.' },
     ]);
   });
 

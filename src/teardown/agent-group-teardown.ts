@@ -20,10 +20,28 @@
  *  - **Resolve by folder before the row is gone.** `--folder` lookups go
  *    through `agent_groups`, so folder resolution must happen up front. The
  *    plan captures the folder so a resumed run can still find the directory.
+ *    Once the row IS gone the folder is unrecoverable from the DB, so in
+ *    residual mode an operator-supplied `--folder` supplements `--id` — put
+ *    through the same `assertSafePath` guard as any DB-derived value. Without
+ *    it, `groups/<folder>/` can never be removed and the run is incomplete.
  *  - **Every directory removal is keyed on the exact target id.** Removing a
  *    surviving group's session directory would be unrecoverable, so each path
  *    is re-derived from the target id/folder and re-checked against its root
- *    immediately before `rm`.
+ *    immediately before `rm`. The *plan* applies the same guard, so a path the
+ *    executor would refuse is shown as refused rather than as `WILL DELETE`.
+ *  - **Never hardcode `docker`.** Every shell-out uses `CONTAINER_RUNTIME_BIN`
+ *    from `src/container-runtime.ts`, so swapping runtimes (the
+ *    `/convert-to-apple-container` skill rewrites that one file) stays a
+ *    one-file change. We call `env.exec(CONTAINER_RUNTIME_BIN, …)` rather than
+ *    that module's `stopContainer()` helper because teardown has to turn a
+ *    failed stop into a reported warning — `stopContainer` throws and discards
+ *    stderr — and because `env.exec` is the injection point that keeps tests
+ *    from ever shelling out.
+ *  - **A failed discovery is not an empty result.** If the runtime binary is
+ *    missing or errors, `WILL STOP — (none)` would read as "nothing is
+ *    running" when the truth is "could not check", and the operator would
+ *    approve deleting rows and session directories out from under a live
+ *    container. Discovery failure is surfaced as `(could not check)`.
  *
  * See `docs/runbooks/agent-group-teardown.md` for the operator-facing runbook
  * and the full deletion order with FK evidence.
@@ -34,6 +52,7 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
+import { CONTAINER_RUNTIME_BIN } from '../container-runtime.js';
 import { hasTable } from '../db/connection.js';
 
 // ---------------------------------------------------------------------------
@@ -98,6 +117,11 @@ export interface TeardownPlan {
   residual: boolean;
   /** Running container names to stop first. */
   containers: string[];
+  /**
+   * True when container discovery could not run (runtime binary missing or
+   * erroring). `containers` is then "unknown", NOT "none" — see the header.
+   */
+  containersUnknown: boolean;
   /** Wirings (`messaging_group_agents`) that will be removed. */
   wirings: { messaging_group_id: string; agent_group_id: string }[];
   /** Session ids owned by this group. */
@@ -112,6 +136,12 @@ export interface TeardownPlan {
   rowCounts: { table: string; count: number; cascades: boolean }[];
   /** Directories that will be removed. Always derived from the target id. */
   directories: string[];
+  /**
+   * Candidate directories the path guard refused at plan time. The executor
+   * refuses them too — they are listed so the plan an operator approves never
+   * over-promises.
+   */
+  refusedDirectories: { path: string; reason: string }[];
   /** Docker image tags to remove. */
   imageTags: string[];
   /** OneCLI vault agent to delete, if found. */
@@ -297,11 +327,38 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * Grep surviving groups' `CLAUDE*.md` for the deleted group's name and for the
+ * Instruction files belonging to one surviving group: top-level `CLAUDE*.md`
+ * plus each per-group skill's `SKILL.md`.
+ *
+ * Deliberately bounded to two known shapes — `groups/<folder>/CLAUDE*.md` and
+ * `groups/<folder>/skills/<skill>/SKILL.md`. A recursive walk of the group
+ * directory would drag in workspaces, caches and checked-out repos.
+ */
+function instructionFiles(groupDir: string): string[] {
+  const files: string[] = [];
+  try {
+    for (const f of fs.readdirSync(groupDir).sort()) {
+      if (/^CLAUDE.*\.md$/i.test(f)) files.push(path.join(groupDir, f));
+    }
+  } catch {
+    return files;
+  }
+  // Per-group skills are group instructions too — a "querying <group> is
+  // mandatory" line in a SKILL.md outlives the group just as readily.
+  for (const skill of listDirs(path.join(groupDir, 'skills'))) {
+    const skillMd = path.join(groupDir, 'skills', skill, 'SKILL.md');
+    if (fs.existsSync(skillMd)) files.push(skillMd);
+  }
+  return files;
+}
+
+/**
+ * Grep surviving groups' instruction files (`CLAUDE*.md` and each per-group
+ * `skills/<name>/SKILL.md`) for the deleted group's name and for the
  * `local_name`s by which each surviving group refers to it.
  *
  * This is the check that catches instructions like "querying <group> is
- * mandatory" left behind in another agent's CLAUDE.md.
+ * mandatory" left behind in another agent's CLAUDE.md or skill.
  */
 export function scanProseReferences(
   env: TeardownEnv,
@@ -331,17 +388,7 @@ export function scanProseReferences(
     if (terms.length === 0) continue;
     const patterns = terms.map((t) => ({ term: t, re: new RegExp(`\\b${escapeRegExp(t)}\\b`, 'i') }));
 
-    let entries: string[];
-    try {
-      entries = fs
-        .readdirSync(path.join(env.groupsDir, folder))
-        .filter((f) => /^CLAUDE.*\.md$/i.test(f))
-        .sort();
-    } catch {
-      continue;
-    }
-    for (const file of entries) {
-      const full = path.join(env.groupsDir, folder, file);
+    for (const full of instructionFiles(path.join(env.groupsDir, folder))) {
       let content: string;
       try {
         content = fs.readFileSync(full, 'utf-8');
@@ -440,12 +487,39 @@ export function findOrphans(
 // Docker / OneCLI discovery
 // ---------------------------------------------------------------------------
 
-/** Running container names belonging to this group. `nanoclaw-v2-<folder>-<ts>`. */
-export function findContainers(env: TeardownEnv, folder: string | null): { names: string[]; warnings: string[] } {
-  if (!folder) return { names: [], warnings: [] };
-  const res = env.exec('docker', ['ps', '--filter', `label=${env.containerInstallLabel}`, '--format', '{{.Names}}']);
+/**
+ * Running container names belonging to this group. `nanoclaw-v2-<folder>-<ts>`.
+ *
+ * `unknown: true` means discovery did not run — no folder to match against, or
+ * the runtime binary failed. It must never be presented as "nothing running".
+ */
+export function findContainers(
+  env: TeardownEnv,
+  folder: string | null,
+): { names: string[]; unknown: boolean; warnings: string[] } {
+  if (!folder) {
+    return {
+      names: [],
+      unknown: true,
+      warnings: [
+        'folder unknown — container discovery skipped. Running containers for this group are NOT stopped. ' +
+          'Re-run with --folder <name> if this group may still have a container up.',
+      ],
+    };
+  }
+  const res = env.exec(CONTAINER_RUNTIME_BIN, [
+    'ps',
+    '--filter',
+    `label=${env.containerInstallLabel}`,
+    '--format',
+    '{{.Names}}',
+  ]);
   if (!res.ok) {
-    return { names: [], warnings: [`docker ps failed: ${res.stderr.trim() || 'unknown error'}`] };
+    return {
+      names: [],
+      unknown: true,
+      warnings: [`${CONTAINER_RUNTIME_BIN} ps failed: ${res.stderr.trim() || 'unknown error'}`],
+    };
   }
   const re = new RegExp(`^nanoclaw-v2-${escapeRegExp(folder)}-\\d+$`);
   return {
@@ -453,6 +527,7 @@ export function findContainers(env: TeardownEnv, folder: string | null): { names
       .split('\n')
       .map((s) => s.trim())
       .filter((n) => re.test(n)),
+    unknown: false,
     warnings: [],
   };
 }
@@ -463,9 +538,9 @@ export function findImageTags(
   agentGroupId: string,
   configImageTag: string | null,
 ): { tags: string[]; warnings: string[] } {
-  const res = env.exec('docker', ['images', '--format', '{{.Repository}}:{{.Tag}}']);
+  const res = env.exec(CONTAINER_RUNTIME_BIN, ['images', '--format', '{{.Repository}}:{{.Tag}}']);
   if (!res.ok) {
-    return { tags: [], warnings: [`docker images failed: ${res.stderr.trim() || 'unknown error'}`] };
+    return { tags: [], warnings: [`${CONTAINER_RUNTIME_BIN} images failed: ${res.stderr.trim() || 'unknown error'}`] };
   }
   const existing = new Set(
     res.stdout
@@ -514,6 +589,12 @@ export function findOnecliAgent(
 
 export interface PlanOptions {
   agentGroupId?: string;
+  /**
+   * Resolves the group when `agentGroupId` is absent. When `agentGroupId` is
+   * given AND its row still exists the DB is authoritative and this is
+   * ignored; in residual mode (row already deleted) it is the only way to
+   * recover the folder, so it supplements `agentGroupId` there.
+   */
   folder?: string;
   keepOnecli?: boolean;
   keepImages?: boolean;
@@ -526,8 +607,8 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
   if (opts.agentGroupId) {
     row = db.prepare('SELECT id, name, folder FROM agent_groups WHERE id = ?').get(opts.agentGroupId) as typeof row;
   } else if (opts.folder) {
-    // Folder resolution must happen while the row still exists — a resumed run
-    // has to be given --id instead.
+    // Folder resolution must happen while the row still exists. A resumed run
+    // passes --id; it may pass --folder as well, which is picked up below.
     row = db.prepare('SELECT id, name, folder FROM agent_groups WHERE folder = ?').get(opts.folder) as typeof row;
   }
   if (!row && !opts.agentGroupId) {
@@ -537,12 +618,25 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
   }
 
   const agentGroupId = row?.id ?? (opts.agentGroupId as string);
-  const folder = row?.folder ?? null;
+  let folder = row?.folder ?? null;
   const residual = !row;
   if (residual) {
     warnings.push(
       `no agent_groups row for ${agentGroupId} — residual mode: DB sweep, directories, image and OneCLI agent only.`,
     );
+    // The row that carried the folder is gone, so a resumed run can only learn
+    // it from the operator. `--folder` supplements `--id` here (it is ignored
+    // when the row still exists — the DB is authoritative then), and it goes
+    // through exactly the same path guard as every DB-derived folder value.
+    if (opts.folder) {
+      try {
+        assertSafePath(path.join(env.groupsDir, opts.folder), env.groupsDir, opts.folder);
+        folder = opts.folder;
+        warnings.push(`using operator-supplied --folder ${JSON.stringify(opts.folder)} for residual cleanup.`);
+      } catch (err) {
+        warnings.push(`ignoring --folder ${JSON.stringify(opts.folder)}: ${(err as Error).message}`);
+      }
+    }
   }
 
   // Containers
@@ -571,12 +665,18 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
     for (const { table } of sessionBlockerTables(db)) sessionBlockers.push({ table, count: 0 });
   }
 
-  // Inbound destination edges from OTHER groups (target_id has no FK)
+  // Inbound destination edges from OTHER groups (target_id has no FK).
+  // `target_id` is polymorphic — a messaging group id OR an agent group id,
+  // per `target_type` — so it is only meaningful together with its type
+  // filter. Matches `getDestinationReferencers`
+  // (`src/modules/agent-to-agent/db/agent-destinations.ts`), and lets
+  // `idx_agent_dest_target` be used.
   const inboundDestinations = hasTable(db, 'agent_destinations')
     ? (db
         .prepare(
           `SELECT agent_group_id, local_name, target_type, target_id
-             FROM agent_destinations WHERE target_id = ? AND agent_group_id != ?`,
+             FROM agent_destinations
+            WHERE target_type = 'agent' AND target_id = ? AND agent_group_id != ?`,
         )
         .all(agentGroupId, agentGroupId) as DestinationEdge[])
     : [];
@@ -593,16 +693,29 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
     return { table, count: n, cascades: cascadesOnAgentGroup(db, table) };
   });
 
-  // Directories — always derived from the target id / folder, never from a scan
+  // Directories — always derived from the target id / folder, never from a
+  // scan, and put through the SAME guard the executor applies so the plan can
+  // never promise a removal that execution will refuse.
   const directories: string[] = [];
+  const refusedDirectories: { path: string; reason: string }[] = [];
+  const considerDir = (dir: string, root: string, expectedName: string): void => {
+    try {
+      assertSafePath(dir, root, expectedName);
+    } catch (err) {
+      refusedDirectories.push({ path: dir, reason: (err as Error).message });
+      return;
+    }
+    if (fs.existsSync(dir)) directories.push(dir);
+  };
   if (folder) {
-    const groupDir = path.join(env.groupsDir, folder);
-    if (fs.existsSync(groupDir)) directories.push(groupDir);
+    considerDir(path.join(env.groupsDir, folder), env.groupsDir, folder);
   } else if (residual) {
-    warnings.push('folder unknown (row already deleted) — groups/<folder>/ will not be removed.');
+    warnings.push(
+      'folder unknown (row already deleted) — groups/<folder>/ will NOT be removed. ' +
+        'Re-run with --id <id> --folder <name> to finish it.',
+    );
   }
-  const sessDir = path.join(sessionsRoot(env), agentGroupId);
-  if (fs.existsSync(sessDir)) directories.push(sessDir);
+  considerDir(path.join(sessionsRoot(env), agentGroupId), sessionsRoot(env), agentGroupId);
 
   // Images
   let imageTags: string[] = [];
@@ -647,6 +760,7 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
     folder,
     residual,
     containers: containersRes.names,
+    containersUnknown: containersRes.unknown,
     wirings,
     sessionIds,
     sessionBlockers,
@@ -654,6 +768,7 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
     staleMirrors: mirrorsRes.mirrors,
     rowCounts,
     directories,
+    refusedDirectories,
     imageTags,
     onecliAgent,
     proseReferences: proseRes.references,
@@ -669,6 +784,13 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
 export interface ExecuteResult {
   steps: { step: string; detail: string }[];
   warnings: string[];
+  /**
+   * Destructive steps that were attempted and failed. Non-empty means the
+   * teardown did NOT finish — callers must not report success. `warnings` is
+   * the superset (it also carries advisory notes); this is the exit-code
+   * signal.
+   */
+  failures: { step: string; detail: string }[];
 }
 
 /**
@@ -678,13 +800,26 @@ export interface ExecuteResult {
 export function executeTeardown(db: Database.Database, env: TeardownEnv, plan: TeardownPlan): ExecuteResult {
   const steps: { step: string; detail: string }[] = [];
   const warnings: string[] = [];
+  const failures: { step: string; detail: string }[] = [];
   const say = (step: string, detail: string) => steps.push({ step, detail });
+  const fail = (step: string, detail: string) => {
+    failures.push({ step, detail });
+    warnings.push(detail);
+  };
+
+  // 0. Discovery that could not run is not discovery that found nothing.
+  if (plan.containersUnknown) {
+    warnings.push(
+      'proceeding without knowing whether containers are running — see the plan WARNINGS. ' +
+        'A live container may still be writing to the session directories removed below.',
+    );
+  }
 
   // 1. Stop running containers before the rows they depend on disappear.
   for (const name of plan.containers) {
-    const res = env.exec('docker', ['stop', '-t', '5', name]);
+    const res = env.exec(CONTAINER_RUNTIME_BIN, ['stop', '-t', '5', name]);
     if (res.ok) say('stop-container', name);
-    else warnings.push(`docker stop ${name} failed: ${res.stderr.trim()}`);
+    else fail('stop-container', `${CONTAINER_RUNTIME_BIN} stop ${name} failed: ${res.stderr.trim()}`);
   }
 
   // 2-8. Central DB, in FK-safe order, as one transaction.
@@ -717,9 +852,11 @@ export function executeTeardown(db: Database.Database, env: TeardownEnv, plan: T
     say('delete-sessions', `sessions: ${s.changes}`);
 
     // 5. Inbound destination edges from OTHER groups — no FK, silently dangle.
+    //    `target_id` is polymorphic, so the delete carries the `target_type`
+    //    filter its meaning depends on.
     if (hasTable(db, 'agent_destinations')) {
       const d = db
-        .prepare('DELETE FROM agent_destinations WHERE target_id = ? AND agent_group_id != ?')
+        .prepare("DELETE FROM agent_destinations WHERE target_type = 'agent' AND target_id = ? AND agent_group_id != ?")
         .run(plan.agentGroupId, plan.agentGroupId);
       say('delete-inbound-destinations', `agent_destinations (other groups → this group): ${d.changes}`);
     }
@@ -739,48 +876,76 @@ export function executeTeardown(db: Database.Database, env: TeardownEnv, plan: T
   });
   tx();
 
-  // 8. Filesystem. Re-derive and re-guard every path.
+  // 8. Filesystem. Re-derive and re-guard every path. `planTeardown` applied
+  //    the same guard, so anything refused here is already reported as refused
+  //    in the plan — this is defence in depth, not the first check.
   for (const dir of plan.directories) {
     if (!fs.existsSync(dir)) continue;
     const parent = path.dirname(dir);
     const name = path.basename(dir);
     if (parent === path.resolve(sessionsRoot(env))) {
       if (name !== plan.agentGroupId) {
-        warnings.push(`skipped ${dir}: not this group's session directory`);
+        fail('remove-directory', `skipped ${dir}: not this group's session directory`);
         continue;
       }
       assertSafePath(dir, sessionsRoot(env), plan.agentGroupId);
     } else if (parent === path.resolve(env.groupsDir)) {
       if (!plan.folder || name !== plan.folder) {
-        warnings.push(`skipped ${dir}: not this group's folder`);
+        fail('remove-directory', `skipped ${dir}: not this group's folder`);
         continue;
       }
       assertSafePath(dir, env.groupsDir, plan.folder);
     } else {
-      warnings.push(`skipped ${dir}: outside groups/ and data/v2-sessions/`);
+      fail('remove-directory', `skipped ${dir}: outside groups/ and data/v2-sessions/`);
       continue;
     }
     const res = removeDirectory(env, dir);
     if (res.ok) say('remove-directory', `${dir}${res.usedContainer ? ' (via throwaway container)' : ''}`);
-    else warnings.push(`could not remove ${dir}: ${res.error}`);
+    else fail('remove-directory', `could not remove ${dir}: ${res.error}`);
   }
 
   // 9. Per-group image tags.
   for (const tag of plan.imageTags) {
-    const res = env.exec('docker', ['rmi', tag]);
+    const res = env.exec(CONTAINER_RUNTIME_BIN, ['rmi', tag]);
     if (res.ok) say('remove-image', tag);
-    else warnings.push(`docker rmi ${tag} failed: ${res.stderr.trim()}`);
+    else fail('remove-image', `${CONTAINER_RUNTIME_BIN} rmi ${tag} failed: ${res.stderr.trim()}`);
   }
 
   // 10. OneCLI vault agent. Removes the agent and its secret ASSIGNMENTS —
-  //     shared vault secrets themselves survive.
+  //     shared vault secrets themselves survive. Leaving it behind means a
+  //     vault agent still holding injectable credentials for a group that no
+  //     longer exists, so a failure here is a failure of the teardown.
   if (plan.onecliAgent) {
     const res = env.exec('onecli', ['agents', 'delete', '--id', plan.onecliAgent.id]);
     if (res.ok) say('delete-onecli-agent', `${plan.onecliAgent.identifier} (${plan.onecliAgent.id})`);
-    else warnings.push(`onecli agents delete failed: ${res.stderr.trim() || res.stdout.trim()}`);
+    else fail('delete-onecli-agent', `onecli agents delete failed: ${res.stderr.trim() || res.stdout.trim()}`);
   }
 
-  return { steps, warnings };
+  return { steps, warnings, failures };
+}
+
+/**
+ * Everything a run left undone, as operator-readable lines.
+ *
+ * Empty means the teardown finished; non-empty means a caller MUST exit
+ * non-zero. The DB half is transactional, but the steps after it are not, and a
+ * run that left `groups/<folder>/` on disk or an OneCLI vault agent alive has
+ * not torn the group down — reporting that as success is how a group becomes
+ * permanently un-cleanable while a vault agent keeps holding injectable
+ * credentials for it.
+ */
+export function collectIncomplete(plan: TeardownPlan, result: ExecuteResult): string[] {
+  const out = [
+    ...result.failures.map((f) => `${f.step}: ${f.detail}`),
+    ...plan.refusedDirectories.map((d) => `remove-directory: refused ${d.path} — ${d.reason}`),
+  ];
+  if (plan.residual && !plan.folder) {
+    out.push(
+      `remove-directory: groups/<folder>/ was NOT removed — the agent_groups row is gone, so the folder ` +
+        `could not be resolved. Re-run with: --id ${plan.agentGroupId} --folder <name> --yes`,
+    );
+  }
+  return out;
 }
 
 /**
@@ -797,7 +962,11 @@ export function removeDirectory(
   dir: string,
 ): { ok: boolean; usedContainer: boolean; error?: string } {
   try {
-    fs.rmSync(dir, { recursive: true });
+    // `force` swallows ENOENT only. It closes the existsSync/rmSync race in
+    // the caller and stops an entry that vanishes mid-walk (a dangling symlink,
+    // a container tidying up) from short-circuiting to `{ok: false}` — ENOENT
+    // is not one of the codes the container fallback below handles.
+    fs.rmSync(dir, { recursive: true, force: true });
     return { ok: true, usedContainer: false };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -806,7 +975,8 @@ export function removeDirectory(
     }
   }
   // Root-owned leftovers — empty from inside a container running as uid 0.
-  const res = env.exec('docker', [
+  // Uses the configured runtime binary like every other shell-out here.
+  const res = env.exec(CONTAINER_RUNTIME_BIN, [
     'run',
     '--rm',
     '-v',
@@ -843,7 +1013,11 @@ export function renderPlan(plan: TeardownPlan): string {
   if (plan.residual) out.push('Mode        : residual cleanup (no agent_groups row)');
 
   h('WILL STOP — running containers');
-  plan.containers.length ? plan.containers.forEach(bullet) : none();
+  if (plan.containers.length) plan.containers.forEach(bullet);
+  else if (plan.containersUnknown) {
+    // Never render a failed check as "(none)" — see the module header.
+    bullet('(COULD NOT CHECK — see WARNINGS. Containers may still be running.)');
+  } else none();
 
   h('WILL DELETE — central DB (data/v2.db), in this order');
   bullet(`1. messaging_group_agents (wiring): ${plan.wirings.length}`);
@@ -863,6 +1037,11 @@ export function renderPlan(plan: TeardownPlan): string {
 
   h('WILL DELETE — filesystem');
   plan.directories.length ? plan.directories.forEach(bullet) : none();
+
+  if (plan.refusedDirectories.length) {
+    h('REFUSED — filesystem (path guard); execution will skip these too');
+    for (const d of plan.refusedDirectories) bullet(`${d.path} — ${d.reason}`);
+  }
 
   h('WILL DELETE — docker images');
   plan.imageTags.length ? plan.imageTags.forEach(bullet) : none();

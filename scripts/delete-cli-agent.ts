@@ -15,7 +15,13 @@ import path from 'path';
 import { CONTAINER_IMAGE_BASE, CONTAINER_INSTALL_LABEL, DATA_DIR, GROUPS_DIR } from '../src/config.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
-import { defaultExec, executeTeardown, planTeardown, type TeardownEnv } from '../src/teardown/agent-group-teardown.js';
+import {
+  collectIncomplete,
+  defaultExec,
+  executeTeardown,
+  planTeardown,
+  type TeardownEnv,
+} from '../src/teardown/agent-group-teardown.js';
 
 function parseArgs(): { folder: string } {
   const argv = process.argv.slice(2);
@@ -58,5 +64,19 @@ const env: TeardownEnv = {
 const plan = planTeardown(db, env, { folder: args.folder });
 const result = executeTeardown(db, env, plan);
 for (const w of result.warnings) console.error(`warning: ${w}`);
+
+// Exit code has to stay honest. The original script let `fs.rmSync` throw,
+// which surfaced "couldn't remove groups/<folder>" as a non-zero exit, and
+// `setup/auto.ts` keys its `cleanup-cli-agent` step purely on exit code
+// (setup/auto.ts:365-375): on non-zero it marks the step failed and warns the
+// user that the test agent may still be around, which is exactly right. It
+// does NOT abort setup, so a truthful non-zero here costs nothing on the
+// happy path and stops a failed cleanup being logged as SUCCESS.
+const incomplete = collectIncomplete(plan, result);
+if (incomplete.length > 0) {
+  for (const line of incomplete) console.error(`incomplete: ${line}`);
+  console.error(`Teardown of ${plan.agentGroupId} (${args.folder}) did not finish.`);
+  process.exit(2);
+}
 
 console.log(`Deleted agent group ${plan.agentGroupId} (${args.folder}).`);

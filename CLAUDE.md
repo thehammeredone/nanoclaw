@@ -82,7 +82,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `container/skills/` | Container skills mounted into every agent session (`onecli-gateway`, `welcome`, `self-customize`, `agent-browser`, `slack-formatting`) |
 | `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills, per-group `agent-runner-src/` overlay) |
 | `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
-| `scripts/delete-agent-group.ts` | Tear down an agent group — plan by default, `--yes` to execute. `ncl groups delete` cannot do this. See [docs/runbooks/agent-group-teardown.md](docs/runbooks/agent-group-teardown.md) |
+| `scripts/delete-agent-group.ts` | Tear down an agent group — plan by default, `--yes` to execute. Stop the host service first; exit `2` means executed-but-incomplete. `ncl groups delete` cannot do this. See [docs/runbooks/agent-group-teardown.md](docs/runbooks/agent-group-teardown.md) |
 | `migrate-v2.sh` + `setup/migrate-v2/` | v1→v2 migration. Standalone script: `bash migrate-v2.sh`. Seeds DB, copies groups/sessions, installs channels, builds container, offers service switchover, then hands off to `/migrate-from-v1` skill for owner setup and CLAUDE.md cleanup. See [docs/migration-dev.md](docs/migration-dev.md). |
 
 ## Admin CLI (`ncl`)
