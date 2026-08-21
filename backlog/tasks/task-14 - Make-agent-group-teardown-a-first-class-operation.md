@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:51'
-updated_date: '2026-08-21 01:03'
+updated_date: '2026-08-21 01:05'
 labels:
   - docs
 dependencies: []
@@ -137,4 +137,58 @@ uses this tool against local-qwen3.6, which is its intended first real use.
 The EACCES/root-owned-stub fallback branch is implemented and unit-covered on the non-privileged
 path but was NEVER exercised for real -- no synthetic group produced root-owned stubs. That
 branch fired for real in TASK-11, so it matters.
+
+CORRECTION + FULL REVIEW RESULT 2026-08-20. Supersedes the framing of finding 2 above.
+
+VERDICT: Spec ✅ compliant (all five ACs verified against the diff AND against live data).
+Quality: CHANGES REQUESTED on two Important items. No Critical.
+
+The reviewer independently derived the blocking FK set rather than trusting the runbook and
+found NO FK the tool would still trip on. Key structural proof: every inbound reference to
+agent_groups uses a column literally named agent_group_id, so the introspection sweep is
+PROVABLY complete -- there is no differently-named FK column it could miss. The two sessions
+blockers are computed, not hard-coded, and deleted before the sessions DELETE.
+
+The path guard was attacked with 11 hostile folder/id values ('../groups/keeper',
+'../../precious', absolute, '..', '.', '/', empty, 'sub/../keeper', etc). ALL 11 BLOCKED, zero
+breaches, sibling dirs and out-of-root files survived every case. Symlink-to-directory is not
+an escape either (rmSync unlinks the link, target intact). The crud.ts 'genericDelete
+unchanged' claim was verified byte-for-byte: 11 changed lines total, deleteHandler set in
+exactly one file. The cli_scope self-destruct reasoning was CONFIRMED at dispatch.ts:85-88 --
+--id really is auto-filled to the caller's own group, so declining to wire the real teardown
+behind that verb was correct. accessToken really is stripped (:508) and the live 'onecli agents
+list' really does emit aoc_ tokens, so that mattered.
+
+IMPORTANT #2 IS WORSE THAN RECORDED ABOVE. It is not merely 'silent'; residual mode can NEVER
+finish the job, and the run still exits 0. Two halves compose badly:
+  (a) planTeardown resolves 'folder' only from the agent_groups row (:527-531). Once that row
+      is gone, folder is null, so groups/<folder>/ is NEVER removed -- and passing
+      '--id X --folder Y' does NOT help, because opts.folder is ignored entirely whenever
+      opts.agentGroupId is set.
+  (b) scripts/delete-agent-group.ts:128 calls process.exit(0) UNCONDITIONALLY, regardless of
+      result.warnings.
+Failure scenario: the DB transaction commits, then 'rm -rf groups/aurora' fails (root-owned
+stub, alpine unavailable) and 'onecli agents delete' fails (gateway down). The script prints
+warnings and EXITS 0. The operator re-runs with --id as the runbook instructs; residual mode
+warns 'folder unknown' and exits 0 again. Net result: a permanently un-cleanable group
+directory PLUS a live OneCLI vault agent still holding injectable credentials for a group that
+no longer exists -- with success exit codes throughout. The runbook's TL;DR claim that
+'re-running after a partial failure finishes the job' is therefore FALSE for the group
+directory.
+  Fix: let --folder supplement --id in residual mode, AND exit non-zero when result.warnings is
+  non-empty (at minimum when the directory or OneCLI steps failed). Correct the runbook TL;DR.
+
+Additional minor the earlier list missed: renderPlan can OVERSTATE -- in the escape harness the
+plan listed a sibling dir under 'WILL DELETE' for a group whose folder was '../groups/keeper',
+even though execution correctly refused it. Fails safe (over-warns, under-deletes) but plan and
+execute should agree.
+
+Reviewer's dangling-symlink retest: the ENOENT-mid-walk concern from the other reviewer does
+NOT reproduce -- rmSync recursive handled it. So minor #4 above is TOCTOU-only, not a
+live-churn hazard.
+
+Reviewer recommendation: approve after the two Important items. Both are small -- import one
+constant, and propagate an exit code plus accept --folder in residual mode. Neither risks
+destroying the WRONG data on this Docker/Linux install; target selection is the strongest part
+of the diff.
 <!-- SECTION:NOTES:END -->
