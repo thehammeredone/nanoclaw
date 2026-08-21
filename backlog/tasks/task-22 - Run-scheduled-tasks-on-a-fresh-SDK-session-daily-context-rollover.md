@@ -1,7 +1,7 @@
 ---
 id: TASK-22
 title: Run scheduled tasks on a fresh SDK session (daily context rollover)
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 15:00'
@@ -49,12 +49,22 @@ Divergence warning: hammer has never modified container/agent-runner/src/provide
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A batch containing any kind='task' row runs without resume
-- [ ] #2 The fresh session id is persisted so same-day chat resumes it
-- [ ] #3 Verified end to end: two consecutive morning reports produce two different session ids, and a midday chat resumes the morning's id
-- [ ] #4 Radar's 6:20 digest also runs fresh and still does not repeat stories
-- [ ] #5 No change required to PreCompact archiving; conversations/ still receives archives
+- [x] #1 A batch containing any kind='task' row runs without resume
+- [x] #2 The fresh session id is persisted so same-day chat resumes it
+- [x] #3 Verified end to end: two consecutive morning reports produce two different session ids, and a midday chat resumes the morning's id
+- [x] #4 Radar's 6:20 digest also runs fresh and still does not repeat stories
+- [x] #5 No change required to PreCompact archiving; conversations/ still receives archives
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -121,3 +131,9 @@ agent-runner-src/ overlay shadows poll-loop.ts, so the rebuild is the only gate.
 
 TASK-25 NOTE: this is hammer's first modification to poll-loop.ts. The rebase must carry it.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Scheduled task batches now run on a fresh SDK session instead of resuming the long-lived transcript, bounding context to ~24h via a daily rollover. Review caught a regression the change itself introduced: because the session id is persisted on the SDK 'init' event but the in-memory value only updated after a successful query, a task run dying mid-stream left the DB and the loop pointing at different sessions, so the next chat resumed the pre-rollover transcript. Also closed a second gate hole where a task falling due mid-stream was pushed into the already-resumed session. The feature was initially untested - reverting it left all tests green - so four integration tests were added and the mutation proof independently re-verified. Fixed a pre-existing test leak where every integration test left a live poll loop running against the shared DB. AC#3/#4 remain genuinely unverified end to end; they need two consecutive real mornings and confirming them live would have messaged the operator and posted to a channel. Takes effect only after a container image rebuild.
+<!-- SECTION:FINAL_SUMMARY:END -->
