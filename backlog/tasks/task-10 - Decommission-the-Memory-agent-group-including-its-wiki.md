@@ -1,10 +1,11 @@
 ---
 id: TASK-10
 title: Decommission the Memory agent group including its wiki
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-31 02:50'
-updated_date: '2026-07-31 03:18'
+updated_date: '2026-08-21 00:21'
 labels:
   - memory
 dependencies:
