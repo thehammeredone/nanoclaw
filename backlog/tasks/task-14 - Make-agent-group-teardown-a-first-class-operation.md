@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:51'
-updated_date: '2026-08-21 00:36'
+updated_date: '2026-08-21 01:03'
 labels:
   - docs
 dependencies: []
@@ -85,4 +85,56 @@ Verified deletion order from pragma_foreign_key_list (all NO ACTION):
   inbound -> messaging_groups: messaging_group_agents, sessions, pending_channel_approvals,
                                pending_sender_approvals, user_dms
   NO FK (must be hunted):      unregistered_senders.messaging_group_id
+
+REVIEW FINDINGS 2026-08-20 (orchestrator session fe8a8e37). NOT YET APPLIED -- session ended.
+Implementation is committed at 5d44af5c on branch task-14-make-agent-group-teardown-a-first-class-operation, which is NOT merged. tsc clean, 370 tests pass, no Critical finding, happy path correct. FK ordering, path guards, plan/execute split and the report-only-mirrors rationale all verified against source.
+
+FIX THESE TWO BEFORE MERGING OR USING THE TOOL:
+
+1. IMPORTANT -- agent-group-teardown.ts:446 (also :466, :685, :771, :809). 'docker' is hardcoded
+   in all five shell-outs, bypassing CONTAINER_RUNTIME_BIN / stopContainer() in
+   src/container-runtime.ts, which exists precisely so a runtime swap is a one-file change and
+   which /convert-to-apple-container rewrites. On an Apple-container install every docker call
+   fails, findContainers returns [], the plan prints 'WILL STOP -- (none)' with the real reason
+   buried in WARNINGS, and executeTeardown then deletes rows and rm -rf's
+   data/v2-sessions/<id>/ out from under a STILL-RUNNING agent container.
+
+2. IMPORTANT -- agent-group-teardown.ts:445. 'if (!folder) return { names: [], warnings: [] };'
+   emits no warning, so residual mode (the documented resume path, plan.folder === null) skips
+   container discovery entirely and SILENTLY. A resumed '--id ... --yes' removes the session
+   directory with no indication containers were never checked. Line 602 warns for the same
+   residual case on the groups dir, so this is an inconsistency as well as a hazard.
+
+MINOR (defer or fold in):
+3. scripts/delete-cli-agent.ts:59-62 -- the shim prints warnings to stderr then exits 0. The old
+   script let fs.rmSync throw, giving non-zero. setup/auto.ts:365 keys its cleanup step purely on
+   exit code, so 'couldn't remove groups/_ping-test' is now reported as SUCCESS -- the opposite of
+   the contract asserted at delete-agent-group.ts:126-128.
+4. agent-group-teardown.ts:800 -- fs.rmSync without force:true. An ENOENT raised mid-walk is not
+   EACCES/EPERM/ENOTEMPTY, so it skips the container fallback and returns {ok:false}: directory
+   left behind, warning only, exit 0. force:true also closes the existsSync/rmSync TOCTOU at :744.
+5. src/cli/resources/groups.ts:75-86 -- deleteHandler always throws, but operations.delete stays
+   'approval' and dispatch.ts:104-125 requests approval BEFORE invoking the handler. A container
+   agent running 'ncl groups delete' (--id auto-filled under cli_scope: group) DMs an admin an
+   approval request that looks like agent self-destruction; on approve, the handler throws. The
+   refusal should short-circuit ahead of the approval round-trip.
+6. agent-group-teardown.ts:579 and :722 -- inbound-edge query/delete use
+   'WHERE target_id = ? AND agent_group_id != ?' with no target_type='agent' filter, though
+   target_id is polymorphic. The established helper at
+   src/modules/agent-to-agent/db/agent-destinations.ts:109 does filter. Not exploitable today
+   (both id spaces are UUID/prefixed) and it leaves idx_agent_dest_target unused, but it is a
+   latent mismatch on a DESTRUCTIVE statement.
+7. agent-group-teardown.ts:337 -- the prose scan globs only top-level CLAUDE*.md per surviving
+   group. Per-group skills (groups/<folder>/skills/*/SKILL.md) are group instructions too and are
+   never scanned, so a 'querying <deleted group> is mandatory' line in a skill survives teardown
+   unreported -- exactly the failure mode AC#3 exists to catch.
+
+ALSO UNRESOLVED (raised by the implementer, not yet addressed): a real teardown races the live
+host sweep. The tool stops containers and deletes the wiring first, but the 60s sweep runs
+throughout. The runbook does not tell operators to stop the service first. Decide before TASK-13
+uses this tool against local-qwen3.6, which is its intended first real use.
+
+The EACCES/root-owned-stub fallback branch is implemented and unit-covered on the non-privileged
+path but was NEVER exercised for real -- no synthetic group produced root-owned stubs. That
+branch fired for real in TASK-11, so it matters.
 <!-- SECTION:NOTES:END -->
