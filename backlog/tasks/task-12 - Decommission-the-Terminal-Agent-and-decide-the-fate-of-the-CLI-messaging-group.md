@@ -1,7 +1,7 @@
 ---
 id: TASK-12
 title: Decommission the Terminal Agent and decide the fate of the CLI messaging group
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:50'
@@ -46,12 +46,22 @@ should be reworded once "Terminal Agent" no longer exists.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 agent_groups row, wiring, session and destinations for ag-1779227551242-zf47au removed
-- [ ] #2 groups/_ping-test/ and data/v2-sessions/ag-1779227551242-zf47au/ deleted from disk
-- [ ] #3 OneCLI agent 58026a01 deleted
-- [ ] #4 Explicit decision on keeping or deleting cli messaging group mg-1779227551244-r6tvmp
-- [ ] #5 Confirmed a fresh setup run still provisions its ping-test agent correctly
+- [x] #1 agent_groups row, wiring, session and destinations for ag-1779227551242-zf47au removed
+- [x] #2 groups/_ping-test/ and data/v2-sessions/ag-1779227551242-zf47au/ deleted from disk
+- [x] #3 OneCLI agent 58026a01 deleted
+- [x] #4 Explicit decision on keeping or deleting cli messaging group mg-1779227551244-r6tvmp
+- [x] #5 Confirmed a fresh setup run still provisions its ping-test agent correctly
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -95,3 +105,9 @@ names the NEXT scratch agent setup will create, so it is forward-looking and sti
 The operator's own Claude Code memory file feedback_not_terminal_agent.md was left to the
 orchestrator to reword (it lives outside this repo).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Deleted the Terminal Agent group, its wiring, session, destination, directories, and OneCLI vault agent 58026a01. Resolved the open AC#4 decision on evidence: the CLI messaging group was deleted too, because scripts/init-cli-agent.ts does a get-or-create on it keyed by (channel_type, platform_id) and setup calls that script, making the deletion self-healing rather than destructive - a future setup run recreates the group and its wiring from nothing. The cli channel adapter itself is main-shipped infrastructure and was left untouched. Verified zero dependent rows, no dangling unregistered_senders, clean foreign_key_check and integrity_check, and that all four surviving destinations still resolve.
+<!-- SECTION:FINAL_SUMMARY:END -->
