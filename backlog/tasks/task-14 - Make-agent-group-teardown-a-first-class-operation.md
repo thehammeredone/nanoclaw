@@ -1,10 +1,11 @@
 ---
 id: TASK-14
 title: Make agent-group teardown a first-class operation
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-31 02:51'
-updated_date: '2026-08-20 23:30'
+updated_date: '2026-08-21 00:36'
 labels:
   - docs
 dependencies: []
