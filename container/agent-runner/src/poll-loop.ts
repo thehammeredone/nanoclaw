@@ -2,7 +2,12 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
+import {
+  clearContinuation,
+  getContinuation,
+  migrateLegacyContinuation,
+  setContinuation,
+} from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
   formatMessages,
@@ -186,11 +191,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const runFresh = shouldRunFresh(keep);
     if (runFresh) {
       log('Batch contains a task-kind row — running without resume (fresh session)');
+      // Drop the in-memory id too, not just the `resume` argument. The
+      // provider persists its new session id the moment `init` fires, so
+      // from here on the old id is pure staleness: if the query dies
+      // mid-stream we must not fall back to resuming the pre-rollover
+      // transcript, and isSessionInvalid() below must never be asked to
+      // judge a session that isn't the one that errored.
+      continuation = undefined;
     }
 
     const query = config.provider.query({
       prompt,
-      continuation: runFresh ? undefined : continuation,
+      continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
     });
@@ -210,6 +222,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
+
+      // Re-sync from the store before deciding anything else. `init` persists
+      // the session id as soon as the provider emits it, but the in-memory
+      // variable is only updated after a *successful* query — so a failure
+      // after `init` leaves the two disagreeing. Reloading first means (a) a
+      // fresh task session survives a mid-stream failure and same-day chat
+      // still resumes it, and (b) the isSessionInvalid() check below judges
+      // the session that actually errored rather than a superseded one.
+      // If the provider died before `init`, this restores whatever was on
+      // file — correct, since no new session was ever created.
+      continuation = getContinuation(config.providerName);
 
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
@@ -298,9 +321,11 @@ async function processQuery(
   // claim age (see src/host-sweep.ts); if something is truly stuck, the host
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
-  let endedForCommand = false;
+  // Set when we deliberately close the stream so the outer loop can re-enter
+  // and handle the pending rows through the canonical path.
+  let endedEarly = false;
   const pollHandle = setInterval(() => {
-    if (done || pollInFlight || endedForCommand) return;
+    if (done || pollInFlight || endedEarly) return;
     pollInFlight = true;
 
     void (async () => {
@@ -316,7 +341,20 @@ async function processQuery(
         // canonical command path + formatMessagesWithCommands.
         if (pending.some((m) => isRunnerCommand(m))) {
           log('Pending slash command — ending stream so outer loop can process');
-          endedForCommand = true;
+          endedEarly = true;
+          query.end();
+          return;
+        }
+
+        // Scheduled tasks need a fresh session (see shouldRunFresh). Pushing
+        // one into the live query would fold the report into the transcript
+        // we are trying to roll over from — the exact unbounded-context case
+        // this exists to prevent. Same remedy as the command path above: end
+        // the stream and leave the rows pending so the outer loop starts them
+        // without resume.
+        if (shouldRunFresh(pending)) {
+          log('Pending task-kind row — ending stream so outer loop can run it fresh');
+          endedEarly = true;
           query.end();
           return;
         }

@@ -5,6 +5,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
+import type { AgentProvider, AgentQuery } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
 beforeEach(() => {
@@ -18,8 +19,26 @@ beforeEach(() => {
     .run();
 });
 
-afterEach(() => {
+// runPollLoop never returns on its own, so every test used to leave its loop
+// running against the module-global test DB. Those orphans kept polling into
+// later tests (and later files) and stealing their messages. Track each loop
+// plus the queries it opened so teardown can end the streams, close the DB out
+// from under the loop, and await its rejection before the next test starts.
+const activeLoops: Array<{ raw: Promise<void>; queries: AgentQuery[] }> = [];
+
+afterEach(async () => {
+  for (const loop of activeLoops) {
+    for (const q of loop.queries) {
+      try {
+        q.end();
+      } catch {
+        /* already finished */
+      }
+    }
+  }
   closeSessionDb();
+  await Promise.all(activeLoops.map((l) => l.raw.catch(() => {})));
+  activeLoops.length = 0;
 });
 
 function insertMessage(id: string, content: object, opts?: { platformId?: string; channelType?: string; threadId?: string }) {
@@ -297,14 +316,28 @@ describe('poll loop integration', () => {
 
 });
 
-// Helper: run poll loop until aborted or timeout
+// Helper: run poll loop until aborted or timeout. The loop itself is
+// registered in `activeLoops` so afterEach can shut it down for real.
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
+  const queries: AgentQuery[] = [];
+  const tracked: AgentProvider = {
+    supportsNativeSlashCommands: provider.supportsNativeSlashCommands,
+    isSessionInvalid: (err) => provider.isSessionInvalid(err),
+    query: (input) => {
+      const q = provider.query(input);
+      queries.push(q);
+      return q;
+    },
+  };
+  const raw = runPollLoop({
+    provider: tracked,
+    providerName: 'mock',
+    cwd: '/tmp',
+  });
+  activeLoops.push({ raw, queries });
+
   return Promise.race([
-    runPollLoop({
-      provider,
-      providerName: 'mock',
-      cwd: '/tmp',
-    }),
+    raw,
     new Promise<void>((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')));
     }),
@@ -410,6 +443,185 @@ describe('poll loop — /clear command', () => {
     await loopPromise.catch(() => {});
   });
 });
+
+describe('poll loop — task-fresh session rollover', () => {
+  it('task batch runs without resume; chat-only batch resumes', async () => {
+    setContinuation('mock', 'S1-old-transcript');
+
+    insertTask('t-task', { prompt: 'daily report' });
+
+    const provider = new RecordingProvider('S2-fresh', () => '<message to="discord-test">report</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 4000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 1, 2000);
+
+    // The task query must NOT have been handed the pre-rollover id.
+    expect(provider.continuations).toEqual([undefined]);
+    expect(getContinuation('mock')).toBe('S2-fresh');
+
+    // Same-day chat resumes the FRESH session, not the old one.
+    insertMessage('m-chat', { sender: 'Alice', text: 'follow up' }, { platformId: 'chan-1', channelType: 'discord' });
+    await waitFor(() => provider.continuations.length >= 2, 3000);
+    controller.abort();
+
+    expect(provider.continuations[1]).toBe('S2-fresh');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('C1: fresh task run that fails after init does not resume the pre-rollover id', async () => {
+    setContinuation('mock', 'S1-old-transcript');
+
+    insertTask('t-task', { prompt: 'daily report' });
+
+    // First query: emits init 'S2-fresh' then throws (API 529 mid-stream).
+    // Second query (the follow-up chat): succeeds.
+    const provider = new RecordingProvider('S2-fresh', () => '<message to="discord-test">ok</message>', {
+      throwOnFirstQuery: true,
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 4000);
+
+    // Error response is written to outbound when the query throws.
+    await waitFor(() => getUndeliveredMessages().some((m) => JSON.parse(m.content).text.startsWith('Error:')), 2000);
+    expect(provider.continuations).toEqual([undefined]);
+
+    insertMessage('m-chat', { sender: 'Alice', text: 'follow up' }, { platformId: 'chan-1', channelType: 'discord' });
+    await waitFor(() => provider.continuations.length >= 2, 3000);
+    controller.abort();
+
+    // The whole point: the post-failure chat must not resume S1.
+    expect(provider.continuations[1]).not.toBe('S1-old-transcript');
+    expect(provider.continuations[1]).toBe('S2-fresh');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('C1: a genuinely invalid session is still cleared, not resurrected by the re-sync', async () => {
+    setContinuation('mock', 'pre-existing-session');
+    insertMessage('m1', { sender: 'Alice', text: 'stale session' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new InvalidSessionProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    // init persisted 'doomed-session'; the catch must clear it, not keep it.
+    expect(getContinuation('mock')).toBeUndefined();
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('I2: a task arriving mid-stream ends the stream and runs fresh instead of being pushed', async () => {
+    setContinuation('mock', 'S1-old-transcript');
+
+    insertMessage('m-chat', { sender: 'Alice', text: 'chatting at 06:19' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new RecordingProvider('S2-fresh', () => '<message to="discord-test">ok</message>', {
+      keepOpen: true,
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 5000);
+
+    // Wait for the chat query to be in flight (it resumes the old transcript).
+    await waitFor(() => provider.continuations.length >= 1, 2000);
+    expect(provider.continuations[0]).toBe('S1-old-transcript');
+
+    // Cron fires at 06:20 while the chat stream is still open.
+    insertTask('t-task', { prompt: 'daily digest' });
+
+    // It must arrive as a NEW query with no resume — not as a push().
+    await waitFor(() => provider.continuations.length >= 2, 4000);
+    controller.abort();
+
+    expect(provider.continuations[1]).toBeUndefined();
+    expect(provider.pushes.join('\n')).not.toContain('daily digest');
+
+    await loopPromise.catch(() => {});
+  });
+});
+
+function insertTask(id: string, content: object) {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+       VALUES (?, 'task', datetime('now'), 'pending', 'chan-1', 'discord', ?)`,
+    )
+    .run(id, JSON.stringify(content));
+}
+
+/**
+ * Provider that records the continuation it was handed on every query and
+ * every push() it received, so tests can assert on resume behaviour.
+ * Optionally throws after emitting `init` on the first query only.
+ */
+class RecordingProvider {
+  readonly supportsNativeSlashCommands = false;
+  readonly continuations: Array<string | undefined> = [];
+  readonly pushes: string[] = [];
+  private queryCount = 0;
+
+  constructor(
+    private sessionId: string,
+    private responseFactory: (prompt: string) => string,
+    private opts: { throwOnFirstQuery?: boolean; keepOpen?: boolean } = {},
+  ) {}
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query(input: { prompt: string; continuation?: string; cwd: string }) {
+    this.continuations.push(input.continuation);
+    const shouldThrow = this.opts.throwOnFirstQuery === true && this.queryCount === 0;
+    // Closing the stream after the first result is the default so each batch
+    // becomes its own query — that is what lets a test observe the resume
+    // argument per batch. keepOpen models the live-stream case (I2).
+    const keepOpen = this.opts.keepOpen === true;
+    this.queryCount++;
+
+    const sessionId = this.sessionId;
+    const responseFactory = this.responseFactory;
+    const pushes = this.pushes;
+    const queued: string[] = [];
+    let waiting: (() => void) | null = null;
+    let ended = false;
+
+    return {
+      push(message: string) {
+        pushes.push(message);
+        queued.push(message);
+        waiting?.();
+      },
+      end() {
+        ended = true;
+        waiting?.();
+      },
+      abort() {
+        ended = true;
+        waiting?.();
+      },
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: sessionId };
+        if (shouldThrow) throw new Error('Overloaded (529)');
+        yield { type: 'result' as const, text: responseFactory(input.prompt) };
+        while (keepOpen && !ended) {
+          if (queued.length > 0) {
+            yield { type: 'result' as const, text: responseFactory(queued.shift()!) };
+            continue;
+          }
+          await new Promise<void>((resolve) => {
+            waiting = resolve;
+          });
+          waiting = null;
+        }
+      })(),
+    };
+  }
+}
 
 /**
  * Provider that throws on every query, simulating API failures.

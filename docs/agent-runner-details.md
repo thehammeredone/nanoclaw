@@ -701,12 +701,19 @@ Archive location: `/workspace/agent/conversations/{date}-{summary}.md`
 
 ### Session Resume
 
-The agent-runner tracks `sessionId` and `resumeAt` across queries:
+The poll loop carries an opaque **continuation** across queries. It is provider-private — Claude resumes a `.jsonl` transcript, another provider might reload a thread id — so the poll loop never interprets it.
 
-- `sessionId` — captured from `ProviderEvent { type: 'init' }`. Passed back to `QueryInput.sessionId` on the next query.
-- `resumeAt` — Claude-specific (last assistant message UUID). Stored by the agent-runner, passed to `QueryInput.resumeAt`. Providers that don't support this ignore it.
+- Captured from `ProviderEvent { type: 'init' }` and passed back as `QueryInput.continuation` on the next query.
+- Persisted the moment `init` fires (not at the end of the turn), so a container that dies mid-turn still resumes on the next wake.
+- Stored **in the session's own `outbound.db`**, in `session_state` under `continuation:<provider>` — not in the central DB. Keyed per provider so a Codex thread id is never handed to Claude. See `container/agent-runner/src/db/session-state.ts`.
+- Cleared by `/clear`, and by the stale-session recovery path when `provider.isSessionInvalid(err)` says the stored id is unusable.
 
-These are ephemeral to the container's lifetime. When the container is killed and restarted, the host passes the stored `sessionId` from the central DB's sessions table. `resumeAt` is lost on container restart (the provider resumes from the end of the session).
+**Task-fresh rollover.** A batch containing any `kind='task'` row (a scheduled run) is queried **without** the continuation, so scheduled reports start a fresh session each time and the day's later chat resumes *that* session. This bounds context growth for daily reports and makes them re-read `CLAUDE.local.md` at startup. Two details follow from it:
+
+- Mixed batches use `.some()`, not `.every()` — a chat message arriving in the same poll rides into the fresh session.
+- A task row that comes due **while a query is streaming** does not get pushed into the live session. The follow-up poller ends the stream and leaves the row pending so the outer loop runs it through the fresh path.
+
+See `shouldRunFresh()` in `container/agent-runner/src/poll-loop.ts`.
 
 ### Container Startup
 

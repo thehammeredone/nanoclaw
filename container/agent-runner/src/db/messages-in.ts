@@ -23,10 +23,17 @@ function hasOnWakeColumn(db: ReturnType<typeof openInboundDb>): boolean {
   return _hasOnWake;
 }
 
+/**
+ * Mirrors `MessageInKind` in the host's src/types.ts. Kept as a union rather
+ * than `string` so a typo like 'tasks' fails to compile instead of silently
+ * disabling a kind-gated behaviour (e.g. the task-fresh session rollover).
+ */
+export type MessageInKind = 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system';
+
 export interface MessageInRow {
   id: string;
   seq: number | null;
-  kind: string;
+  kind: MessageInKind;
   timestamp: string;
   status: string;
   process_after: string | null;
