@@ -13,6 +13,8 @@ import {
   assertSafePath,
   collectIncomplete,
   findContainers,
+  findImageTags,
+  findOnecliAgent,
   cascadesOnAgentGroup,
   executeTeardown,
   findOrphans,
@@ -171,6 +173,38 @@ describe('findContainers', () => {
   });
 });
 
+describe('findImageTags', () => {
+  it('flags "could not check" rather than returning an empty list', () => {
+    env.exec = fakeExec({ 'docker images': { ok: false, stdout: '', stderr: 'command not found' } });
+    const res = findImageTags(env, 'ag-doomed', null);
+    expect(res.tags).toEqual([]);
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/command not found/);
+  });
+
+  it('reports a clean empty result as known-empty', () => {
+    env.exec = fakeExec({ 'docker images': { ok: true, stdout: '\n', stderr: '' } });
+    const res = findImageTags(env, 'ag-doomed', null);
+    expect(res).toEqual({ tags: [], unknown: false, warnings: [] });
+  });
+});
+
+describe('findOnecliAgent', () => {
+  it('flags "could not check" rather than returning "no agent"', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: false, stdout: '', stderr: 'gateway unreachable' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/gateway unreachable/);
+  });
+
+  it('reports a clean empty result as known-empty', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: JSON.stringify({ data: [] }), stderr: '' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res).toEqual({ agent: null, unknown: false, warnings: [] });
+  });
+});
+
 describe('onecliIdentifier', () => {
   it('prefixes ids that start with a digit', () => {
     expect(onecliIdentifier('103c34dd-8610-4bd6')).toBe('ag-103c34dd-8610-4bd6');
@@ -261,6 +295,30 @@ describe('planTeardown', () => {
     expect(fs.existsSync(path.join(tmp, 'groups', 'keeper'))).toBe(true);
   });
 
+  it('refuses a residual --folder that belongs to a surviving group, even though the name is shaped safely', () => {
+    // Reproduces the round-2 CRITICAL finding: --id names a ghost group with
+    // no agent_groups row, but --folder points at ag-keeper's LIVE directory
+    // (a plausible typo). assertSafePath alone would pass this — the name is
+    // a direct child of groups/ with no traversal — so the fix has to check
+    // ownership in the DB, not just path shape.
+    fs.writeFileSync(path.join(tmp, 'groups', 'keeper', 'CANARY'), 'still alive');
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-ghost', folder: 'keeper' });
+    expect(plan.residual).toBe(true);
+    expect(plan.folder).toBeNull();
+    expect(plan.warnings.join('\n')).toMatch(/belongs to surviving agent group ag-keeper/);
+    expect(plan.directories.join('|')).not.toMatch(/keeper/);
+
+    // Executing the (correctly empty) plan must not touch the live directory
+    // or its row — this is the exact residue the finding reproduced.
+    const result = executeTeardown(db, env, plan);
+    expect(result.failures).toEqual([]);
+    expect(fs.existsSync(path.join(tmp, 'groups', 'keeper', 'CANARY'))).toBe(true);
+    expect(db.prepare(`SELECT id, folder FROM agent_groups WHERE id = 'ag-keeper'`).get()).toEqual({
+      id: 'ag-keeper',
+      folder: 'keeper',
+    });
+  });
+
   it('reports a folder the guard refuses instead of listing it as WILL DELETE', () => {
     db.prepare(`UPDATE agent_groups SET folder = ? WHERE id = 'ag-doomed'`).run('../groups/keeper');
     const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
@@ -278,6 +336,24 @@ describe('planTeardown', () => {
     const text = renderPlan(plan);
     expect(text).toMatch(/COULD NOT CHECK/);
     expect(text).not.toMatch(/WILL STOP — running containers\n─+\n {2}\(none\)/);
+  });
+
+  it('reports failed image-tag discovery as unknown, never as none', () => {
+    env.exec = fakeExec({ 'docker images': { ok: false, stdout: '', stderr: 'Cannot connect to the daemon' } });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    expect(plan.imageTags).toEqual([]);
+    expect(plan.imagesUnknown).toBe(true);
+    const text = renderPlan(plan);
+    expect(text).toMatch(/WILL DELETE — docker images\n─+\n {2}\(COULD NOT CHECK/);
+  });
+
+  it('reports failed OneCLI discovery as unknown, never as none', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: false, stdout: '', stderr: 'gateway unreachable' } });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    expect(plan.onecliAgent).toBeNull();
+    expect(plan.onecliUnknown).toBe(true);
+    const text = renderPlan(plan);
+    expect(text).toMatch(/WILL DELETE — OneCLI vault agent\n─+\n {2}\(COULD NOT CHECK/);
   });
 
   it('counts the session blockers a sweep would miss', () => {
@@ -539,6 +615,43 @@ describe('collectIncomplete (drives the scripts exit code)', () => {
     const third = planTeardown(db, env, { agentGroupId: 'ag-doomed', folder: 'doomed' });
     expect(collectIncomplete(third, executeTeardown(db, env, third))).toEqual([]);
     expect(fs.existsSync(path.join(tmp, 'groups', 'doomed'))).toBe(false);
+  });
+
+  it('a failed image-tag discovery is INCOMPLETE, not a silent (none)', () => {
+    env.exec = fakeExec({ 'docker images': { ok: false, stdout: '', stderr: 'Cannot connect to the daemon' } });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    const result = executeTeardown(db, env, plan);
+    expect(collectIncomplete(plan, result).join('\n')).toMatch(/remove-image: could not check/);
+  });
+
+  it('a failed OneCLI discovery is INCOMPLETE, not a silent (none)', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: false, stdout: '', stderr: 'gateway unreachable' } });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    const result = executeTeardown(db, env, plan);
+    expect(collectIncomplete(plan, result).join('\n')).toMatch(/delete-onecli-agent: could not check/);
+  });
+
+  it('reproduces the round-2 finding: every binary unavailable still exits non-zero', () => {
+    // docker ps / docker images / onecli agents list all fail — the exact
+    // scenario the finding reproduced, where the directory removal (which
+    // does not depend on these binaries) succeeds and used to mask the rest.
+    env.exec = fakeExec({
+      'docker ps': { ok: false, stdout: '', stderr: 'docker ps failed' },
+      'docker images': { ok: false, stdout: '', stderr: 'docker images failed' },
+      'onecli agents list': { ok: false, stdout: '', stderr: 'onecli agents list failed' },
+    });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    expect(plan.containersUnknown).toBe(true);
+    expect(plan.imagesUnknown).toBe(true);
+    expect(plan.onecliUnknown).toBe(true);
+    const result = executeTeardown(db, env, plan);
+    expect(result.failures).toEqual([]); // nothing was "attempted and failed"
+    expect(fs.existsSync(path.join(tmp, 'groups', 'doomed'))).toBe(false); // dir removal succeeded
+    const incomplete = collectIncomplete(plan, result);
+    expect(incomplete.length).toBe(3);
+    expect(incomplete.join('\n')).toMatch(/stop-container: could not determine/);
+    expect(incomplete.join('\n')).toMatch(/remove-image: could not check/);
+    expect(incomplete.join('\n')).toMatch(/delete-onecli-agent: could not check/);
   });
 });
 

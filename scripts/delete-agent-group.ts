@@ -32,9 +32,11 @@
  *   1  usage error, or the target could not be resolved (nothing ran)
  *   2  executed but INCOMPLETE — the DB half committed, but at least one of
  *      the group directory, session directory, image tag, container stop or
- *      OneCLI vault agent was not dealt with. Read the INCOMPLETE block and
- *      re-run. Never treat 2 as success: a surviving OneCLI agent still holds
- *      injectable credentials for a group that no longer exists.
+ *      OneCLI vault agent was not dealt with — including when discovery of an
+ *      image tag or the vault agent itself failed (docker/onecli unreachable).
+ *      Read the INCOMPLETE block and re-run. Never treat 2 as success: a
+ *      surviving OneCLI agent still holds injectable credentials for a group
+ *      that no longer exists.
  *
  * Deletion order and FK evidence: docs/runbooks/agent-group-teardown.md
  */
@@ -132,7 +134,11 @@ if (result.warnings.length > 0) {
   for (const w of result.warnings) console.log(`  ${w}`);
 }
 console.log('');
-console.log(`Torn down agent group ${plan.agentGroupId}${plan.folder ? ` (${plan.folder})` : ''}.`);
+// Not a success claim — the DB transaction is committed by this point, but
+// steps 1 and 8-10 (containers, filesystem, images, OneCLI) are not
+// transactional and may still have failed. The INCOMPLETE block below (and
+// the exit code) is the actual verdict.
+console.log(`DB teardown committed for ${plan.agentGroupId}${plan.folder ? ` (${plan.folder})` : ''}.`);
 if (plan.proseReferences.length > 0) {
   console.log(`Follow up: ${plan.proseReferences.length} prose reference(s) in surviving groups — see the plan above.`);
 }

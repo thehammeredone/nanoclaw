@@ -22,8 +22,12 @@
  *    plan captures the folder so a resumed run can still find the directory.
  *    Once the row IS gone the folder is unrecoverable from the DB, so in
  *    residual mode an operator-supplied `--folder` supplements `--id` — put
- *    through the same `assertSafePath` guard as any DB-derived value. Without
- *    it, `groups/<folder>/` can never be removed and the run is incomplete.
+ *    through the same `assertSafePath` guard as any DB-derived value, AND
+ *    checked against `agent_groups` for a surviving owner (the path guard only
+ *    proves the name is shaped safely, not that nothing else still owns it — a
+ *    typo must not be able to point removal at a live group's directory).
+ *    Without a usable `--folder`, `groups/<folder>/` can never be removed and
+ *    the run is incomplete.
  *  - **Every directory removal is keyed on the exact target id.** Removing a
  *    surviving group's session directory would be unrecoverable, so each path
  *    is re-derived from the target id/folder and re-checked against its root
@@ -33,15 +37,22 @@
  *    from `src/container-runtime.ts`, so swapping runtimes (the
  *    `/convert-to-apple-container` skill rewrites that one file) stays a
  *    one-file change. We call `env.exec(CONTAINER_RUNTIME_BIN, …)` rather than
- *    that module's `stopContainer()` helper because teardown has to turn a
- *    failed stop into a reported warning — `stopContainer` throws and discards
- *    stderr — and because `env.exec` is the injection point that keeps tests
+ *    that module's `stopContainer()` helper for three reasons: teardown has to
+ *    turn a failed stop into a reported warning, and `stopContainer` throws
+ *    instead of returning a result; `stopContainer` hardcodes `-t 1` where
+ *    teardown deliberately uses `-t 5` so a container gets a chance to flush
+ *    its outbound DB; and `env.exec` is the injection point that keeps tests
  *    from ever shelling out.
- *  - **A failed discovery is not an empty result.** If the runtime binary is
- *    missing or errors, `WILL STOP — (none)` would read as "nothing is
- *    running" when the truth is "could not check", and the operator would
- *    approve deleting rows and session directories out from under a live
- *    container. Discovery failure is surfaced as `(could not check)`.
+ *  - **A failed discovery is not an empty result.** If the runtime binary or
+ *    `onecli` is missing or errors, `WILL STOP — (none)` / `WILL DELETE —
+ *    docker images (none)` / `WILL DELETE — OneCLI vault agent (none)` would
+ *    read as "nothing exists" when the truth is "could not check", and the
+ *    operator would approve deleting rows and directories out from under a
+ *    live container, or leave a vault agent still holding injectable
+ *    credentials for a group that no longer exists. Discovery failure is
+ *    surfaced as `(COULD NOT CHECK)` for containers, images AND the OneCLI
+ *    agent, and all three are counted in `collectIncomplete` so the exit code
+ *    reflects it too.
  *
  * See `docs/runbooks/agent-group-teardown.md` for the operator-facing runbook
  * and the full deletion order with FK evidence.
@@ -144,8 +155,18 @@ export interface TeardownPlan {
   refusedDirectories: { path: string; reason: string }[];
   /** Docker image tags to remove. */
   imageTags: string[];
+  /**
+   * True when image-tag discovery could not run (runtime binary erroring).
+   * `imageTags` is then "unknown", NOT "none" — see the module header.
+   */
+  imagesUnknown: boolean;
   /** OneCLI vault agent to delete, if found. */
   onecliAgent: { id: string; name: string; identifier: string } | null;
+  /**
+   * True when OneCLI discovery could not run (`onecli agents list` erroring).
+   * `onecliAgent` is then "unknown", NOT "none" — see the module header.
+   */
+  onecliUnknown: boolean;
   /** Prose mentions of this group in surviving groups' instruction files. */
   proseReferences: ProseReference[];
   /** Report-only: orphans that exist now or would exist after this teardown. */
@@ -532,15 +553,24 @@ export function findContainers(
   };
 }
 
-/** Per-group image tags: `<base>:<agent-group-id>`, plus whatever the config records. */
+/**
+ * Per-group image tags: `<base>:<agent-group-id>`, plus whatever the config records.
+ *
+ * `unknown: true` means discovery did not run — the runtime binary failed. It
+ * must never be presented as "no image tag exists" — see the module header.
+ */
 export function findImageTags(
   env: TeardownEnv,
   agentGroupId: string,
   configImageTag: string | null,
-): { tags: string[]; warnings: string[] } {
+): { tags: string[]; unknown: boolean; warnings: string[] } {
   const res = env.exec(CONTAINER_RUNTIME_BIN, ['images', '--format', '{{.Repository}}:{{.Tag}}']);
   if (!res.ok) {
-    return { tags: [], warnings: [`${CONTAINER_RUNTIME_BIN} images failed: ${res.stderr.trim() || 'unknown error'}`] };
+    return {
+      tags: [],
+      unknown: true,
+      warnings: [`${CONTAINER_RUNTIME_BIN} images failed: ${res.stderr.trim() || 'unknown error'}`],
+    };
   }
   const existing = new Set(
     res.stdout
@@ -551,7 +581,7 @@ export function findImageTags(
   const candidates = new Set<string>([`${env.containerImageBase}:${agentGroupId}`]);
   // Only ever consider a config-recorded tag when it is unambiguously ours.
   if (configImageTag && configImageTag.endsWith(`:${agentGroupId}`)) candidates.add(configImageTag);
-  return { tags: [...candidates].filter((t) => existing.has(t)), warnings: [] };
+  return { tags: [...candidates].filter((t) => existing.has(t)), unknown: false, warnings: [] };
 }
 
 /** OneCLI identifier for a group: the id, `ag-`-prefixed when it starts with a digit. */
@@ -559,28 +589,44 @@ export function onecliIdentifier(agentGroupId: string): string {
   return /^[a-z]/i.test(agentGroupId) ? agentGroupId : `ag-${agentGroupId}`;
 }
 
+/**
+ * `unknown: true` means the `onecli agents list` call itself failed — discovery
+ * did not run. It must never be presented as "no vault agent exists" — see the
+ * module header. A successful call that fails to parse still returns
+ * `unknown: false` (matching the pre-existing behaviour); the exec-failure case
+ * is what round-2 review found silently exiting 0 with a live vault agent left
+ * behind.
+ */
 export function findOnecliAgent(
   env: TeardownEnv,
   agentGroupId: string,
-): { agent: { id: string; name: string; identifier: string } | null; warnings: string[] } {
+): { agent: { id: string; name: string; identifier: string } | null; unknown: boolean; warnings: string[] } {
   const res = env.exec('onecli', ['agents', 'list']);
   if (!res.ok) {
-    return { agent: null, warnings: [`onecli agents list failed: ${res.stderr.trim() || 'unknown error'}`] };
+    return {
+      agent: null,
+      unknown: true,
+      warnings: [`onecli agents list failed: ${res.stderr.trim() || 'unknown error'}`],
+    };
   }
   let parsed: { data?: { id: string; name: string; identifier: string; isDefault?: boolean }[] };
   try {
     parsed = JSON.parse(res.stdout);
   } catch (err) {
-    return { agent: null, warnings: [`could not parse onecli agents list: ${(err as Error).message}`] };
+    return { agent: null, unknown: false, warnings: [`could not parse onecli agents list: ${(err as Error).message}`] };
   }
   const wanted = onecliIdentifier(agentGroupId);
   const match = (parsed.data ?? []).find((a) => a.identifier === wanted || a.identifier === agentGroupId);
-  if (!match) return { agent: null, warnings: [] };
+  if (!match) return { agent: null, unknown: false, warnings: [] };
   if (match.isDefault) {
-    return { agent: null, warnings: [`refusing to touch the OneCLI default agent (${match.identifier})`] };
+    return {
+      agent: null,
+      unknown: false,
+      warnings: [`refusing to touch the OneCLI default agent (${match.identifier})`],
+    };
   }
   // Deliberately drop every other field — `agents list` includes accessToken.
-  return { agent: { id: match.id, name: match.name, identifier: match.identifier }, warnings: [] };
+  return { agent: { id: match.id, name: match.name, identifier: match.identifier }, unknown: false, warnings: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -631,8 +677,22 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
     if (opts.folder) {
       try {
         assertSafePath(path.join(env.groupsDir, opts.folder), env.groupsDir, opts.folder);
-        folder = opts.folder;
-        warnings.push(`using operator-supplied --folder ${JSON.stringify(opts.folder)} for residual cleanup.`);
+        // The path guard only proves the folder name is shaped safely — it says
+        // nothing about who owns it. A residual --id paired with a live group's
+        // folder (e.g. a typo) must not be allowed to point removal at that
+        // group's directory. The DB is already open and has the answer.
+        const owner = db.prepare('SELECT id FROM agent_groups WHERE folder = ?').get(opts.folder) as
+          | { id: string }
+          | undefined;
+        if (owner) {
+          warnings.push(
+            `ignoring --folder ${JSON.stringify(opts.folder)}: it belongs to surviving agent group ${owner.id}. ` +
+              `Refusing to remove another group's directory.`,
+          );
+        } else {
+          folder = opts.folder;
+          warnings.push(`using operator-supplied --folder ${JSON.stringify(opts.folder)} for residual cleanup.`);
+        }
       } catch (err) {
         warnings.push(`ignoring --folder ${JSON.stringify(opts.folder)}: ${(err as Error).message}`);
       }
@@ -719,6 +779,7 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
 
   // Images
   let imageTags: string[] = [];
+  let imagesUnknown = false;
   if (!opts.keepImages) {
     const configTag = hasTable(db, 'container_configs')
       ? ((
@@ -729,14 +790,17 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
       : null;
     const imgRes = findImageTags(env, agentGroupId, configTag);
     imageTags = imgRes.tags;
+    imagesUnknown = imgRes.unknown;
     warnings.push(...imgRes.warnings);
   }
 
   // OneCLI
   let onecliAgent: TeardownPlan['onecliAgent'] = null;
+  let onecliUnknown = false;
   if (!opts.keepOnecli) {
     const oneRes = findOnecliAgent(env, agentGroupId);
     onecliAgent = oneRes.agent;
+    onecliUnknown = oneRes.unknown;
     warnings.push(...oneRes.warnings);
   }
 
@@ -770,7 +834,9 @@ export function planTeardown(db: Database.Database, env: TeardownEnv, opts: Plan
     directories,
     refusedDirectories,
     imageTags,
+    imagesUnknown,
     onecliAgent,
+    onecliUnknown,
     proseReferences: proseRes.references,
     orphans,
     warnings,
@@ -945,6 +1011,26 @@ export function collectIncomplete(plan: TeardownPlan, result: ExecuteResult): st
         `could not be resolved. Re-run with: --id ${plan.agentGroupId} --folder <name> --yes`,
     );
   }
+  // A failed discovery is not an empty result — see the module header. If we
+  // never learned whether containers/images/a vault agent exist, the run is
+  // not complete, even though nothing was "attempted and failed" in the usual
+  // sense. Without this, a run with every binary unavailable exits 0 while a
+  // vault agent still holds injectable credentials for a deleted group.
+  if (plan.containersUnknown) {
+    out.push(
+      `stop-container: could not determine whether containers are running for this group — see WARNINGS. ` +
+        `A live container may still be up.`,
+    );
+  }
+  if (plan.imagesUnknown) {
+    out.push(`remove-image: could not check for this group's image tag — see WARNINGS. It may still exist.`);
+  }
+  if (plan.onecliUnknown) {
+    out.push(
+      `delete-onecli-agent: could not check the OneCLI vault for this group's agent — see WARNINGS. ` +
+        `A vault agent may still hold injectable credentials for this group.`,
+    );
+  }
   return out;
 }
 
@@ -1044,12 +1130,19 @@ export function renderPlan(plan: TeardownPlan): string {
   }
 
   h('WILL DELETE — docker images');
-  plan.imageTags.length ? plan.imageTags.forEach(bullet) : none();
+  if (plan.imageTags.length) plan.imageTags.forEach(bullet);
+  else if (plan.imagesUnknown) {
+    // Never render a failed check as "(none)" — see the module header.
+    bullet('(COULD NOT CHECK — see WARNINGS. An image tag may still exist.)');
+  } else none();
 
   h('WILL DELETE — OneCLI vault agent');
   if (plan.onecliAgent) {
     bullet(`${plan.onecliAgent.name} — identifier ${plan.onecliAgent.identifier} (id ${plan.onecliAgent.id})`);
     bullet('removes the agent and its secret assignments; shared vault secrets survive');
+  } else if (plan.onecliUnknown) {
+    // Never render a failed check as "(none)" — see the module header.
+    bullet('(COULD NOT CHECK — see WARNINGS. A vault agent may still exist, still holding injectable credentials.)');
   } else none();
 
   h('REPORT ONLY — stale per-session destination mirrors');

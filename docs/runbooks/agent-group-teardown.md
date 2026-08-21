@@ -40,7 +40,7 @@ Flags: `--yes` (execute), `--folder <name>`, `--keep-onecli`, `--keep-images`.
 |---|---|
 | `0` | Plan printed (dry run), or executed with **every** step complete. |
 | `1` | Usage error, or the target could not be resolved. Nothing ran. |
-| `2` | Executed but **incomplete**. The DB half committed; at least one of the group directory, session directory, image tag, container stop or OneCLI vault agent was not dealt with. The `INCOMPLETE` block lists what. |
+| `2` | Executed but **incomplete**. The DB half committed; at least one of the group directory, session directory, image tag, container stop or OneCLI vault agent was not dealt with — including cases where discovery itself failed (e.g. `docker`/`onecli` unreachable), which counts as incomplete even though nothing was "attempted and failed" in the usual sense. The `INCOMPLETE` block lists what. |
 
 Never read `2` as success. The dangerous residue is the OneCLI vault agent: it
 still holds injectable credentials for a group that no longer exists.
@@ -61,8 +61,11 @@ pnpm exec tsx scripts/delete-agent-group.ts --id <agent-group-id> --folder <name
 
 `--folder` supplements `--id` **only** in residual mode (while the row exists the
 DB is authoritative). It goes through the same `assertSafePath` guard as every
-other folder value, so a traversal attempt is refused rather than followed.
-Without it, residual mode reports `folder unknown` and exits `2`.
+other folder value, so a traversal attempt is refused rather than followed —
+and it is checked against `agent_groups` for a surviving owner, so a typo'd
+`--folder` naming a still-live group's directory is refused rather than
+silently torn down. Without a usable `--folder`, residual mode reports `folder
+unknown` and exits `2`.
 
 Container discovery is also folder-keyed, so a residual run without `--folder`
 cannot stop containers either — it prints `WILL STOP — (COULD NOT CHECK …)`
@@ -140,10 +143,12 @@ failure in any of them means the teardown is unfinished, so it is listed in the
 Every container-runtime shell-out in steps 1, 8 (root-owned-stub fallback) and 9
 goes through `CONTAINER_RUNTIME_BIN` (`src/container-runtime.ts`), so the
 `/convert-to-apple-container` swap remains a one-file change. It is called via
-the injected `env.exec` rather than that module's `stopContainer()` helper
-because teardown must turn a failed stop into a reported warning —
-`stopContainer` throws and discards stderr — and because `env.exec` is what
-keeps the tests from ever shelling out.
+the injected `env.exec` rather than that module's `stopContainer()` helper for
+three reasons: teardown must turn a failed stop into a reported warning, and
+`stopContainer` throws instead of returning a result; `stopContainer` hardcodes
+`-t 1` where teardown deliberately uses `-t 5` so a container gets a chance to
+flush its outbound DB; and `env.exec` is what keeps the tests from ever
+shelling out.
 
 ---
 
@@ -219,15 +224,20 @@ caller.
 - **Every directory removal is keyed on the exact target id.** `assertSafePath`
   re-derives `<root>/<expected-name>` and refuses anything else, immediately
   before each `rm`. Removing a surviving group's session directory would be
-  unrecoverable.
+  unrecoverable. In residual mode, an operator-supplied `--folder` additionally
+  gets checked against `agent_groups` for a surviving owner — the path guard
+  only proves the name is shaped safely, not that nothing else still owns it.
 - **The plan never over-promises.** Planning applies the same guard the executor
   applies, so a path that would be refused is printed under `REFUSED —
   filesystem` instead of `WILL DELETE`. An operator approves the plan, so plan
   and execute have to agree.
-- **A failed check is not an empty result.** If the container runtime is missing
-  or errors, the plan prints `WILL STOP — (COULD NOT CHECK …)`, never `(none)`.
+- **A failed check is not an empty result.** If the container runtime or
+  `onecli` is missing or errors, the plan prints `(COULD NOT CHECK …)` for
+  containers, docker images, and the OneCLI vault agent — never `(none)`.
   Otherwise an operator would approve deleting rows and session directories out
-  from under a live container.
+  from under a live container, or leave a vault agent still holding injectable
+  credentials for a deleted group. All three failure modes are counted in
+  `collectIncomplete`, so the exit code is `2`, not `0`.
 - **Container matching is anchored**: `^nanoclaw-v2-<folder>-\d+$`, so folder
   `foo` never matches container `nanoclaw-v2-foo-2-<ts>`.
 - **Image matching is exact**: only `<base>:<agent-group-id>` that actually
