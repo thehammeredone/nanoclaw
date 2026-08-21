@@ -1,7 +1,7 @@
 ---
 id: TASK-11
 title: Decommission the Coder agent group
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:50'
@@ -37,11 +37,19 @@ src/providers/ opencode support or anything installed by /add-opencode as part o
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 agent_groups row and every dependent row for 54c8dbdf removed
-- [ ] #2 groups/coder/ and data/v2-sessions/54c8dbdf-.../ deleted from disk
-- [ ] #3 OneCLI agent c982a432 deleted along with its secret assignments
-- [ ] #4 opencode provider install left intact (decided 2026-07-30 — revisit planned)
+- [x] #1 agent_groups row and every dependent row for 54c8dbdf removed
+- [x] #2 groups/coder/ and data/v2-sessions/54c8dbdf-.../ deleted from disk
+- [x] #3 OneCLI agent c982a432 deleted along with its secret assignments
+- [x] #4 opencode provider install left intact (decided 2026-07-30 — revisit planned)
 <!-- AC:END -->
+
+
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -84,3 +92,9 @@ no env column; mcp_servers was {}).
 REVIEW NOTE: spec compliance verified by the orchestrator against the live DB, disk, OneCLI,
 and all four test suites. No code-quality gate -- the diff is a single file deletion.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Deleted the Coder agent group, its session, and OneCLI vault agent c982a432. Zero rows remain across all ten agent_group_id tables; foreign_key_check and integrity_check clean; diff is a single file deletion. The root-owned Docker mount-stub problem predicted by TASK-8 fired here for the first time - delete-cli-agent.ts threw EACCES on the session dir - and was cleared with a guarded throwaway-container removal. AC#4 proven rather than asserted: the opencode provider install is fully intact, with all four test/typecheck suites passing including the Bun-side opencode factory tests. Coder's container_configs row, the only non-null-provider row in the install, was preserved outside the repo as the sole worked example of an opencode group config.
+<!-- SECTION:FINAL_SUMMARY:END -->
