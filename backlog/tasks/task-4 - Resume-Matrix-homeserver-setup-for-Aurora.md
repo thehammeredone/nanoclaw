@@ -1,10 +1,10 @@
 ---
 id: TASK-4
 title: Resume Matrix homeserver setup for Aurora
-status: Needs Review
+status: Done
 assignee: []
 created_date: '2026-07-09 14:31'
-updated_date: '2026-08-20 22:19'
+updated_date: '2026-08-21 01:02'
 labels:
   - matrix
   - aurora
@@ -84,4 +84,8 @@ This cannot be automated -- it needs two physical phones and Ann. Moved out of '
 to 'Needs Review' so the orchestrator's next-task selector (orchestrate.py:157 returns any
 In Progress task as 'resume', with no blocked state) can advance past it instead of
 deadlocking the run. Move it back to 'To Do'/'In Progress' when the devices are in hand.
+
+CLOSED 2026-08-20 by operator decision. Ann has completed the Element install on her iPhone, which was the only outstanding item (Step 6). Steps 1-5 were already verified complete against the live central DB earlier in this session: homeserver reachable at thehammeredone.ddns.net, Matrix adapter installed and self-registered, both DM messaging groups present, both wired to Aurora, and Hammer's session live.
+
+Note carried forward: as of this session, messages_out across every Aurora session contained ZERO rows ever delivered to matrix:@ann:... The wiring and destination exist, but Aurora's CLAUDE.local.md never instructs it to send to Ann, so nothing has ever reached her. Ann having Element installed does not by itself change that. See TASK-23 (clone Aurora onto its own agent group for Ann's DM), which is the task that actually gives her a working agent.
 <!-- SECTION:NOTES:END -->

@@ -1,10 +1,10 @@
 ---
 id: TASK-19
 title: Move Skylight credentials out of plaintext into the OneCLI vault
-status: Needs Review
+status: Done
 assignee: []
 created_date: '2026-07-31 03:20'
-updated_date: '2026-08-20 23:57'
+updated_date: '2026-08-21 01:02'
 labels:
   - skylight
 dependencies: []
@@ -86,4 +86,26 @@ outcomes and no safe default, and the task itself says to confirm viability befo
 to an approach.
 
 PARKED 2026-08-20 by the orchestrator at the operator's direction. AC#1 is done and verified; AC#2/#3 await an architecture decision between the four options above. Moved to Needs Review so the orchestrator's selector can advance past it.
+
+CLOSED 2026-08-20 by operator decision: keep the current setup, do not migrate Skylight credentials.
+
+AC#1 IS GENUINELY SATISFIED and was achieved as a side effect of TASK-7 and TASK-8 -- no
+Skylight credentials remain in any messages_in row in any session (swept for
+SKYLIGHT_PASSWORD / SKYLIGHT_EMAIL / the account address: zero hits). The credential-bearing
+scheduled prompt lived in the Discord session that TASK-8 deleted, and TASK-7's replacement
+prompt defers entirely to CLAUDE.local.md.
+
+AC#2 and AC#3 are CLOSED AS WON'T-FIX, not achieved. The credentials remain in plaintext in
+container_configs.mcp_servers and in the materialized groups/skylight-morning/container.json
+(the latter is gitignored). The investigation recorded above established this is not a matter
+of effort: onecli 2.2.0's vault injects secrets into outbound HTTP by host pattern and
+GET /api/secrets returns metadata only -- there is no read-back of a secret value by design --
+while Skylight auth is a headless-Chromium form login where Playwright types the password into
+a DOM field, with no HTTP request in flight to inject into. The vault cannot hold this
+credential in a form the capture flow can use.
+
+If this is revisited, the four options are recorded in the note above. The cheapest one that
+addresses the ACTUAL harm (the credentials have leaked into session transcripts several times
+via config dumps) is option (c): mask secret-shaped env values at the config/CLI surface,
+which needs no change to where the secret is stored.
 <!-- SECTION:NOTES:END -->
