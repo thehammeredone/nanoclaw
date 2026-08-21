@@ -1,11 +1,11 @@
 ---
 id: TASK-14
 title: Make agent-group teardown a first-class operation
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:51'
-updated_date: '2026-08-21 13:40'
+updated_date: '2026-08-21 13:41'
 labels:
   - docs
 dependencies: []
@@ -56,12 +56,22 @@ needs to exist somewhere.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A single documented command tears down an agent group without FK errors
-- [ ] #2 Teardown covers inbound destination edges, per-session destination mirrors, containers, images and the OneCLI agent
-- [ ] #3 Teardown warns about prose references to the group in other groups' instruction files
-- [ ] #4 Orphaned messaging groups and orphaned session directories are reported
-- [ ] #5 Deletion order documented in docs/db-central.md or a runbook
+- [x] #1 A single documented command tears down an agent group without FK errors
+- [x] #2 Teardown covers inbound destination edges, per-session destination mirrors, containers, images and the OneCLI agent
+- [x] #3 Teardown warns about prose references to the group in other groups' instruction files
+- [x] #4 Orphaned messaging groups and orphaned session directories are reported
+- [x] #5 Deletion order documented in docs/db-central.md or a runbook
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -252,3 +262,15 @@ KNOWN REMAINING GAP (filed as follow-up, not blocking): findOnecliAgent leaves u
 when 'onecli agents list' SUCCEEDS but returns unparseable output (JSON.parse throws). Only
 exec failure sets unknown. Narrower than the fixed case and pre-existing.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Promote agent-group teardown to a first-class, safe-by-default operation.
+
+scripts/delete-agent-group.ts + src/teardown/agent-group-teardown.ts replace the FK-throwing 'ncl groups delete' and the misnamed delete-cli-agent.ts. Plan-then-execute: a dry-run plan prints by default, --yes executes. Covers FK-ordered row deletion, inbound destination edges, containers, per-group images, the OneCLI vault agent, and root-owned Docker mount stubs via an alpine uid-0 fallback. Reports (without rewriting) per-session destination mirrors, orphaned messaging groups, orphaned session dirs, and prose references in surviving groups' CLAUDE*.md and skills/*/SKILL.md. delete-cli-agent.ts stays as a shim because setup/auto.ts calls it by name. ncl groups delete refuses with a pointer rather than being wired to the real teardown -- under cli_scope: group its --id is auto-filled to the caller's own group, which would make it an agent self-destruct button.
+
+Two review rounds. Round 2 caught a Critical introduced by round 1: operator-supplied --folder in residual mode passed the path guard but was never checked for ownership, so '--id <ghost> --folder <live-folder> --yes' destroyed a live group's directory and exited 0. Now refused via a DB ownership lookup. Also fixed: failed discovery (docker/onecli erroring) rendered as '(none)' and exited 0, stranding a vault agent holding injectable credentials -- now surfaced as '(COULD NOT CHECK)' and counted in collectIncomplete. Exit codes 0/1/2 documented and honest. Host-sweep race documented in the runbook (stop the service first), not coded around.
+
+tsc clean, 395/395 tests (370 at implementation). No real group touched.
+<!-- SECTION:FINAL_SUMMARY:END -->
