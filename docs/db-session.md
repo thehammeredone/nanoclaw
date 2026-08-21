@@ -165,7 +165,9 @@ Crash recovery: on container startup, stale `processing` entries get cleared. Ho
 
 ### 4.3 `session_state`
 
-Persistent container-owned KV store. Main consumer is the Chat SDK session ID — storing it here lets the agent's conversation resume across container restarts. Cleared by `/clear`.
+Persistent container-owned KV store. Main consumer is the agent provider's **continuation** — an opaque resume handle stored under `continuation:<provider>` (e.g. `continuation:claude`), one row per provider. Storing it here lets the agent's conversation resume across container restarts.
+
+Written as soon as the provider emits its `init` event, so a container that dies mid-turn still resumes. Cleared by `/clear` and by stale-session recovery. Also **replaced on every scheduled-task run** — task batches query without resume, so the id on file rolls over to the fresh session (see [agent-runner-details.md](agent-runner-details.md#session-resume)).
 
 ```sql
 CREATE TABLE session_state (

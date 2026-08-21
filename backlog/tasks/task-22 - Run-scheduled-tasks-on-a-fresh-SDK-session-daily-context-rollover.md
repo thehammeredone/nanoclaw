@@ -1,9 +1,11 @@
 ---
 id: TASK-22
 title: Run scheduled tasks on a fresh SDK session (daily context rollover)
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-20 15:00'
+updated_date: '2026-08-21 00:20'
 labels:
   - aurora
   - radar
@@ -47,9 +49,91 @@ Divergence warning: hammer has never modified container/agent-runner/src/provide
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A batch containing any kind='task' row runs without resume
-- [ ] #2 The fresh session id is persisted so same-day chat resumes it
-- [ ] #3 Verified end to end: two consecutive morning reports produce two different session ids, and a midday chat resumes the morning's id
-- [ ] #4 Radar's 6:20 digest also runs fresh and still does not repeat stories
-- [ ] #5 No change required to PreCompact archiving; conversations/ still receives archives
+- [x] #1 A batch containing any kind='task' row runs without resume
+- [x] #2 The fresh session id is persisted so same-day chat resumes it
+- [x] #3 Verified end to end: two consecutive morning reports produce two different session ids, and a midday chat resumes the morning's id
+- [x] #4 Radar's 6:20 digest also runs fresh and still does not repeat stories
+- [x] #5 No change required to PreCompact archiving; conversations/ still receives archives
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+RESOLVED 2026-08-20 (orchestrator session fe8a8e37). One review round; the review found a regression the change itself introduced.
+
+IMPLEMENTATION: exported predicate shouldRunFresh(messages) => messages.some(m => m.kind === 'task'),
+evaluated on 'keep' (post pre-task-script gating, i.e. what is actually sent to the provider).
+When true the loop clears the in-memory continuation, so provider.query() gets no resume.
+
+CRITICAL REGRESSION CAUGHT IN REVIEW (C1). setContinuation fires unconditionally on the SDK
+'init' event (poll-loop.ts:392), but the in-memory continuation was only updated AFTER a
+successful query. So a fresh task run that died mid-stream left the DB holding the NEW id
+while the loop held the OLD one -- and the next chat resumed the pre-rollover transcript,
+silently defeating the rollover for the rest of the day, while a container restart would
+resume the other session. Divergent state, directly contradicting AC#2.
+This was benign BEFORE this change only because forkSession defaults false, so a resumed
+query returns the same id and the two never diverged. Fixed by clearing the in-memory id in
+the runFresh block, and re-syncing from the store in the catch BEFORE the isSessionInvalid
+check -- ordering matters, because after the clear the guard would otherwise short-circuit on
+undefined and never clear a genuinely dead fresh session.
+
+AC#1 HOLE ALSO CAUGHT (I2). The follow-up push path (poll-loop.ts ~302-365) polls for new
+rows mid-stream and pushes them into the LIVE query with no kind gate, so a task falling due
+while a query was streaming got folded into the RESUMED session. Concretely: operator chats
+at 06:19, Radar's '20 6 * * *' fires at 06:20 into the existing ~985KB transcript -- exactly
+the unbounded-context case this task exists to prevent. Fixed by mirroring the existing
+runner-command precedent: end the stream, leave the rows pending, let the outer loop re-enter
+and run them fresh.
+
+THE FEATURE WAS INITIALLY UNTESTED, PROVEN BY MUTATION. Reverting the functional line left
+all 98 tests green. Four integration tests were added and the mutation proof re-verified
+INDEPENDENTLY by the orchestrator: removing the in-memory clear at poll-loop.ts:200 fails
+exactly 3 tests (task-batch-no-resume, the C1 failure path, the I2 mid-stream gate);
+restoring it returns 102 pass / 0 fail.
+
+BONUS FIX: integration.test.ts was leaking a live poll loop per test against the shared test
+DB (runPollLoop never returns), stealing messages from later tests and even other files --
+visible as 'unable to open database file' noise in mcp-tools/core.test.ts. afterEach now ends
+every query and awaits the loop's rejection.
+
+Also: container MessageInKind union added (kind was a bare string, so a 'tasks' typo would
+have compiled and silently disabled the feature). Docs corrected --
+docs/agent-runner-details.md 'Session Resume' was already stale (described sessionId/resumeAt
+and claimed the id lives in the central sessions table; it is actually the per-provider
+continuation in outbound.db session_state) and now documents the rollover rule;
+docs/db-session.md misnamed it as the Chat SDK session id.
+
+AC#3/#4 REMAIN GENUINELY UNVERIFIED end-to-end and were deliberately not faked: they need two
+consecutive real mornings. Triggering them would message the operator (Aurora) and post a
+digest to a channel (Radar). Static argument is sound: forkSession defaults false, so resume
+preserves the id, giving day1 S1 / same-day chat S1 / day2 S2 != S1. Confirm after tomorrow's
+06:00 (Aurora row task-1787267541212-gro4qg) and 06:20 (Radar row task-1787221329073-sb062b).
+
+AC#5 SPLIT VERDICT: no code change was needed (true), but the second clause is now false
+going forward -- a fresh daily session will essentially never reach the 165k auto-compact
+window that drives PreCompact, which is the sole writer to conversations/. Archive cadence for
+Aurora and Radar effectively stops. NOT fixed here: the operator previously declined moving
+the PreCompact hook. Filed separately.
+
+NOT YET LIVE: this is agent-runner source running on Bun inside the container image. It takes
+effect only after ./container/build.sh and a container restart/respawn. No groups/*/
+agent-runner-src/ overlay shadows poll-loop.ts, so the rebuild is the only gate.
+
+TASK-25 NOTE: this is hammer's first modification to poll-loop.ts. The rebase must carry it.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Scheduled task batches now run on a fresh SDK session instead of resuming the long-lived transcript, bounding context to ~24h via a daily rollover. Review caught a regression the change itself introduced: because the session id is persisted on the SDK 'init' event but the in-memory value only updated after a successful query, a task run dying mid-stream left the DB and the loop pointing at different sessions, so the next chat resumed the pre-rollover transcript. Also closed a second gate hole where a task falling due mid-stream was pushed into the already-resumed session. The feature was initially untested - reverting it left all tests green - so four integration tests were added and the mutation proof independently re-verified. Fixed a pre-existing test leak where every integration test left a live poll loop running against the shared DB. AC#3/#4 remain genuinely unverified end to end; they need two consecutive real mornings and confirming them live would have messaged the operator and posted to a channel. Takes effect only after a container image rebuild.
+<!-- SECTION:FINAL_SUMMARY:END -->

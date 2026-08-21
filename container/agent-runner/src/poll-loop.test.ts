@@ -5,6 +5,7 @@ import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
+import { shouldRunFresh } from './poll-loop.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -273,6 +274,32 @@ describe('origin metadata (from= attribute)', () => {
     const prompt = formatMessages(getPendingMessages());
     expect(prompt).toContain('<system_response');
     expect(prompt).toContain('from="discord-main"');
+  });
+});
+
+describe('shouldRunFresh (daily context rollover gate)', () => {
+  it('task-only batch runs fresh (no resume)', () => {
+    const messages = [{ kind: 'task' }];
+    expect(shouldRunFresh(messages)).toBe(true);
+  });
+
+  it('mixed task+chat batch also runs fresh — .some(), not .every()', () => {
+    const messages = [{ kind: 'chat' }, { kind: 'task' }];
+    expect(shouldRunFresh(messages)).toBe(true);
+  });
+
+  it('chat-only batch resumes (does not run fresh)', () => {
+    const messages = [{ kind: 'chat' }, { kind: 'chat' }];
+    expect(shouldRunFresh(messages)).toBe(false);
+  });
+
+  it('empty batch does not run fresh', () => {
+    expect(shouldRunFresh([])).toBe(false);
+  });
+
+  it('other kinds (system, webhook) alone do not trigger a fresh session', () => {
+    const messages = [{ kind: 'system' }, { kind: 'webhook' }];
+    expect(shouldRunFresh(messages)).toBe(false);
   });
 });
 
