@@ -96,11 +96,15 @@ export function registerResourceHelpCommands(): void {
           const idAutoFilled = cliScope === 'group' && (res.plural === 'groups' || res.plural === 'destinations');
           const idHint = idAutoFilled ? '' : ' <id>';
           const verbs: string[] = [];
-          if (res.operations.list) verbs.push(`list [open]`);
-          if (res.operations.get) verbs.push(`get${idHint} [open]`);
-          if (res.operations.create) verbs.push(`create [approval]`);
-          if (res.operations.update) verbs.push(`update${idHint} [approval]`);
-          if (res.operations.delete) verbs.push(`delete${idHint} [approval]`);
+          // Render the declared access level rather than a hardcoded guess —
+          // e.g. `groups delete` is `open` because its handler always refuses,
+          // and labelling it `[approval]` would advertise a round-trip that
+          // never happens.
+          if (res.operations.list) verbs.push(`list [${res.operations.list}]`);
+          if (res.operations.get) verbs.push(`get${idHint} [${res.operations.get}]`);
+          if (res.operations.create) verbs.push(`create [${res.operations.create}]`);
+          if (res.operations.update) verbs.push(`update${idHint} [${res.operations.update}]`);
+          if (res.operations.delete) verbs.push(`delete${idHint} [${res.operations.delete}]`);
           if (res.customOperations) {
             for (const [verb, op] of Object.entries(res.customOperations)) {
               verbs.push(`${verb} [${op.access}] — ${op.description}`);
