@@ -1,7 +1,7 @@
 ---
 id: TASK-10
 title: Decommission the Memory agent group including its wiki
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:50'
@@ -45,11 +45,19 @@ It does NOT handle: the inbound references in TASK-9, or the OneCLI agent. Do TA
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 agent_groups row and every dependent row for f09aa5a1 removed
-- [ ] #2 groups/memory/ and data/v2-sessions/f09aa5a1-.../ deleted from disk
-- [ ] #3 OneCLI agent 48d0d710 deleted along with its secret assignments
-- [ ] #4 No surviving agent references memory as a destination
+- [x] #1 agent_groups row and every dependent row for f09aa5a1 removed
+- [x] #2 groups/memory/ and data/v2-sessions/f09aa5a1-.../ deleted from disk
+- [x] #3 OneCLI agent 48d0d710 deleted along with its secret assignments
+- [x] #4 No surviving agent references memory as a destination
 <!-- AC:END -->
+
+
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -94,3 +102,9 @@ REVIEW NOTE: spec compliance verified by the orchestrator directly against the l
 and OneCLI. No code-quality gate: the diff is a pure deletion of a decommissioned group's
 markdown, with no correctness surface for code-review to read.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Deleted the Memory agent group outright via scripts/delete-cli-agent.ts: the agent_groups row, all dependent rows, groups/memory/ with its wiki, the session directory, and OneCLI vault agent 48d0d710. Verified afterwards that zero rows remain across all ten agent_group_id tables, foreign_key_check and integrity_check are clean, and the diff touches only groups/memory/. AC#4 was already satisfied by TASK-9, which is exactly why that dependency ordering mattered - delete-cli-agent.ts sweeps only outbound edges, so the inbound references from Mjollnir and Terminal Agent had to be cleared first or they would now dangle.
+<!-- SECTION:FINAL_SUMMARY:END -->
