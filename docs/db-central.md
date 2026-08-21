@@ -4,6 +4,8 @@ Complete reference for `data/v2.db`, the host-owned admin-plane database. Start 
 
 Access layer: `src/db/`. Authoritative schema reference: `src/db/schema.ts` (comments only — actual creation runs via migrations in `src/db/migrations/`).
 
+**Deleting rows across these tables is not free-form.** `foreign_keys = ON` is set on every connection and `container_configs` is the only `ON DELETE CASCADE` in this DB, so anything that removes an agent group has to follow a specific order — including two tables (`pending_questions`, `pending_approvals`) that block a `sessions` delete from a direction a group-scoped sweep cannot see, and three references with no FK at all that silently dangle. The order, the FK evidence and the tool that implements it: **[runbooks/agent-group-teardown.md](runbooks/agent-group-teardown.md)**.
+
 ---
 
 ## 1. Tables

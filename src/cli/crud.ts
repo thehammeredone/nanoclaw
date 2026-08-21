@@ -67,6 +67,13 @@ export interface ResourceDef {
     update?: Access;
     delete?: Access;
   };
+  /**
+   * Replaces `genericDelete` for this resource only. Use when a bare
+   * `DELETE FROM <table>` is wrong — e.g. `agent_groups`, where blocking
+   * foreign keys make the generic path fail with a raw SQLite error.
+   * Every other resource keeps `genericDelete` untouched.
+   */
+  deleteHandler?: CustomOperation['handler'];
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
 }
@@ -279,7 +286,7 @@ export function registerResource(def: ResourceDef): void {
       access: def.operations.delete,
       resource: def.plural,
       parseArgs: (raw) => normalizeArgs(raw),
-      handler: genericDelete(def),
+      handler: def.deleteHandler ?? genericDelete(def),
     });
   }
 

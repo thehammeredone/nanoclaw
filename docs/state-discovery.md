@@ -208,6 +208,9 @@ Practical consequence: a group-scoped sweep removes a group's *outbound* edges b
 
 ### Teardown order
 
+Implemented by `scripts/delete-agent-group.ts` (plan by default, `--yes` to execute).
+Authoritative writeup, with the FK evidence per step: [runbooks/agent-group-teardown.md](runbooks/agent-group-teardown.md).
+
 ```
 1. kill running containers for the group's sessions
 2. delete agent_destinations rows in OTHER groups where target_id = this group   (no FK — must be hunted)
@@ -223,7 +226,9 @@ Practical consequence: a group-scoped sweep removes a group's *outbound* edges b
 12. edit prose references in surviving groups' CLAUDE.md / CLAUDE.local.md       (not automatable)
 ```
 
-Steps 5–8 are what `scripts/delete-cli-agent.ts --folder <folder>` already does. Despite its name it is fully generic — it is the closest thing to a working teardown. Steps 1–4 and 9–12 are unimplemented today.
+Steps 1–11 are implemented by `scripts/delete-agent-group.ts`, with the caveat that steps 3 and 11 are **reported, not performed**: per-session `destinations` mirrors self-heal on the next `spawnContainer` (`writeDestinations` → `replaceDestinations` is an unconditional `DELETE` + re-insert), and orphaned messaging groups are a judgement call. Step 12 is not automatable, but the tool greps surviving `groups/*/CLAUDE*.md` for the deleted group's name and for the `local_name`s other groups used for it, and prints `file:line`.
+
+`scripts/delete-cli-agent.ts` — named for setup's ping-pong scratch agent but always generic — is now a deprecated shim delegating to the same code, kept because `setup/auto.ts` invokes it by name.
 
 ### Where a group's state lives
 

@@ -82,6 +82,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `container/skills/` | Container skills mounted into every agent session (`onecli-gateway`, `welcome`, `self-customize`, `agent-browser`, `slack-formatting`) |
 | `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills, per-group `agent-runner-src/` overlay) |
 | `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
+| `scripts/delete-agent-group.ts` | Tear down an agent group — plan by default, `--yes` to execute. `ncl groups delete` cannot do this. See [docs/runbooks/agent-group-teardown.md](docs/runbooks/agent-group-teardown.md) |
 | `migrate-v2.sh` + `setup/migrate-v2/` | v1→v2 migration. Standalone script: `bash migrate-v2.sh`. Seeds DB, copies groups/sessions, installs channels, builds container, offers service switchover, then hands off to `/migrate-from-v1` skill for owner setup and CLAUDE.md cleanup. See [docs/migration-dev.md](docs/migration-dev.md). |
 
 ## Admin CLI (`ncl`)
@@ -287,6 +288,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/architecture.md](docs/architecture.md) | Full architecture writeup |
 | [docs/api-details.md](docs/api-details.md) | Host API + DB schema details |
 | [docs/state-discovery.md](docs/state-discovery.md) | How to inventory this install — query recipes for volatile state, recorded data for stable structure (FK behavior, teardown order, where group state lives) |
+| [docs/runbooks/agent-group-teardown.md](docs/runbooks/agent-group-teardown.md) | Deleting an agent group: the FK-safe deletion order, what self-heals, what must be edited by hand |
 | [docs/db.md](docs/db.md) | DB architecture overview: three-DB model, cross-mount rules, readers/writers map |
 | [docs/db-central.md](docs/db-central.md) | Central DB (`data/v2.db`) — every table + migration system |
 | [docs/db-session.md](docs/db-session.md) | Per-session `inbound.db` + `outbound.db` schemas + seq parity |

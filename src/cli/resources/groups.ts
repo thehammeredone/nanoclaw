@@ -58,6 +58,32 @@ registerResource({
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
   ],
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'approval' },
+  /**
+   * Deleting an agent group is a multi-step teardown, not a row delete.
+   * `genericDelete` would issue a bare `DELETE FROM agent_groups` with
+   * `foreign_keys = ON`, and every group that has ever been wired or run has
+   * blocking references (messaging_group_agents, sessions, agent_destinations,
+   * agent_group_members, user_roles, pending_*), so it can only ever produce a
+   * raw SQLite FK error. It also cannot reach the things that have no FK at
+   * all: other groups' inbound destination edges, running containers, the
+   * per-group image tag, the OneCLI vault agent, the on-disk directories.
+   *
+   * We refuse with a pointer instead of running the teardown here on purpose:
+   * with `cli_scope: group` a container agent gets `--id` auto-filled to its
+   * own group, which would turn this verb into agent self-destruction. The
+   * teardown stays a deliberate operator action on the host.
+   */
+  deleteHandler: async (args) => {
+    const id = (args.id as string) || '<agent-group-id>';
+    throw new Error(
+      `agent groups cannot be deleted with 'ncl groups delete' — it is a bare row delete and foreign keys will reject it.\n` +
+        `Run the teardown tool on the host instead:\n` +
+        `  pnpm exec tsx scripts/delete-agent-group.ts --id ${id}          # plan (changes nothing)\n` +
+        `  pnpm exec tsx scripts/delete-agent-group.ts --id ${id} --yes    # execute\n` +
+        `It stops containers, deletes rows in FK-safe order, removes directories, the image tag and the OneCLI agent,\n` +
+        `and reports prose references and orphans. See docs/runbooks/agent-group-teardown.md.`,
+    );
+  },
   customOperations: {
     restart: {
       access: 'approval',
