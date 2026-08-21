@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:50'
-updated_date: '2026-08-21 00:26'
+updated_date: '2026-08-21 00:31'
 labels:
   - coder
 dependencies:
@@ -47,4 +47,40 @@ src/providers/ opencode support or anything installed by /add-opencode as part o
 
 <!-- SECTION:NOTES:BEGIN -->
 Provenance: Claude Code session 9934a222-4185-48a6-8de2-07b8bbe71cf7 (2026-07-30). Discovery data and reasoning: docs/work-records/2026-07-30-decommission-planning-aurora-discord-wiring-and-four-agent-groups.md and docs/state-discovery.md
+
+RESOLVED 2026-08-20 (orchestrator session fe8a8e37).
+
+Verified independently after deletion:
+  dependent rows across all 10 agent_group_id tables: 0    agent_groups row: 0
+  PRAGMA foreign_key_check clean, integrity_check ok
+  groups/coder/ and data/v2-sessions/54c8dbdf-.../ both gone
+  git diff = exactly one path, groups/coder/CLAUDE.local.md
+  5 agent groups remain: Terminal Agent, Mjollnir, local-qwen3.6, Aurora, Radar
+  5 OneCLI agents remain (Coder's c982a432 deleted; it held only the SHARED Anthropic
+  secret assignment, so the vault secret itself is untouched)
+
+THE ROOT-OWNED MOUNT-STUB PROBLEM DID FIRE HERE, as anticipated from TASK-8.
+delete-cli-agent.ts completed the DB transaction and removed groups/coder/, then threw
+EACCES on the session dir: extra/, extra/code/ and group/ were root-owned Docker bind-mount
+targets. Cleared with a throwaway alpine:3 container running as uid 0, bind-mounted ONLY to
+that group's session dir and guarded by a shell case-match on the exact id suffix, then
+rmdir'd from the host. This is the second confirmed occurrence -- TASK-10's group had none,
+so it depends on which mounts a group used. The guidance is already recorded in TASK-14 and
+TASK-17; this occurrence proves delete-cli-agent.ts genuinely needs the fix rather than it
+being hypothetical.
+
+AC#4 (opencode stays) PROVEN, not asserted: all 7 install files still present,
+src/providers/index.ts:7 still imports './opencode.js', and all four suites pass --
+pnpm test 339/339, host tsc clean, container tsc clean, bun test 102/102 including
+opencode.factory.test.ts and mcp-to-opencode.test.ts.
+
+PRESERVED DELIBERATELY: Coder's container_configs row was the ONLY row in that table with a
+non-null provider, i.e. the sole worked example of how an opencode-backed group is configured.
+Verified after deletion that the table now has zero non-null provider rows. The decoded row is
+saved outside the repo at <scratchpad>/task11/coder-container-config-PRESERVED.md for whoever
+revisits the local-model idea. A secret scan found nothing needing redaction (this schema has
+no env column; mcp_servers was {}).
+
+REVIEW NOTE: spec compliance verified by the orchestrator against the live DB, disk, OneCLI,
+and all four test suites. No code-quality gate -- the diff is a single file deletion.
 <!-- SECTION:NOTES:END -->
