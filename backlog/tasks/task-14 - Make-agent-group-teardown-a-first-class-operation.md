@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 02:51'
-updated_date: '2026-08-21 01:05'
+updated_date: '2026-08-21 13:40'
 labels:
   - docs
 dependencies: []
@@ -191,4 +191,64 @@ Reviewer recommendation: approve after the two Important items. Both are small -
 constant, and propagate an exit code plus accept --folder in residual mode. Neither risks
 destroying the WRONG data on this Docker/Linux install; target selection is the strongest part
 of the diff.
+
+Review findings applied on branch task-14-... at commit 32fc2ebe. All 8 findings addressed (2 Important, 6 Minor) plus the open question (documented, not coded). Runtime shell-outs now use CONTAINER_RUNTIME_BIN; failed container discovery renders as COULD NOT CHECK; --folder supplements --id in residual mode behind assertSafePath; both scripts exit 2 when incomplete (shared collectIncomplete); shim exit code honest for setup/auto.ts; force:true on rmSync; ncl groups delete is 'open' so refusal short-circuits the approval round-trip; target_type='agent' filter on the inbound-edge read and DELETE; prose scan covers per-group skills/<name>/SKILL.md; plan applies the executor path guard (REFUSED section). Runbook adds stop/start of nanoclaw-v2-b3501fc6 (+ launchd equivalent) and corrects the TL;DR idempotence claim. tsc clean, 385 tests pass (was 370). Exit codes verified end-to-end on a synthetic sandbox group; the four real agent groups are unchanged.
+
+ROUND-2 REVIEW + FIX COMPLETE 2026-08-21 (orchestrator session c34ccecb). MERGED.
+
+Implementation 5d44af5c, fix round 1 at 32fc2ebe, fix round 2 at 17338768.
+Final: tsc clean, 395/395 tests (was 370 at implementation).
+
+CRITICAL FOUND AND FIXED IN ROUND 2 -- introduced by the round-1 fix instruction itself.
+Round 1 was told to 'let --folder supplement --id in residual mode'. It did so correctly,
+and the instruction was unsafe: assertSafePath proves a folder is a direct child of groups/
+with no separator, but says NOTHING about whether a surviving agent_groups row owns it.
+  '--id <ghost> --folder keeper --yes' destroyed a LIVE group's directory, left its row,
+  wiring and sessions intact, and exited 0 printing 'Torn down agent group ...'.
+The host keeps waking that group into a directory whose CLAUDE.md, skills, agent-runner-src/
+overlay and workspace are gone and are not in git. Realistic on this install: groups/main
+exists on disk with no backing row, and the runbook hands the operator
+'--id <id> --folder <name> --yes' as ONE command with no dry-run gate.
+  Fix: SELECT id FROM agent_groups WHERE folder = ? after the path guard, before adopting
+  opts.folder; refuse with a warning naming the owner. Violated the module's own stated
+  invariant ('every directory removal is keyed on the exact target id') until fixed.
+
+IMPORTANT ALSO FIXED IN ROUND 2: a FAILED CHECK exited 0. collectIncomplete counted only
+steps attempted-and-failed, so when discovery itself failed (onecli agents list / docker
+images erroring) the step was never attempted and never counted -- rendering '(none)' to
+the operator. That is exactly the residue the exit-code work existed to prevent: a live
+OneCLI vault agent still holding injectable credentials for a deleted group, behind exit 0.
+Round 1 had fixed this bug class for containers and left it for images and OneCLI.
+Now findImageTags/findOnecliAgent carry unknown:true, plan carries imagesUnknown/onecliUnknown,
+render says '(COULD NOT CHECK)', and all three unknowns feed collectIncomplete.
+
+VERIFIED BY REVIEW, NOT ASSUMED: path guard re-attacked with 12 hostile --folder values in
+residual mode -- all traversals refused; symlink case safe (rmSync lstats, unlinks the link,
+target intact). 'approval'->'open' on ncl groups delete cannot weaken any other authorization:
+crud.ts:286 is the sole consumer, registered per-command, and dispatch.ts's cli_scope gate runs
+BEFORE the approval gate and is independent of cmd.access. target_type='agent' filter cannot
+miss a real edge (column only ever holds 'channel' or 'agent').
+
+stopContainer() NOT used, deliberately -- three reasons, all verified: it calls execSync
+directly and so bypasses the TeardownEnv.exec seam every teardown test relies on; it throws
+instead of returning a result teardown can turn into a warning and continue; and it hardcodes
+-t 1 where teardown uses -t 5 so a container can flush its outbound DB. All five shell-outs
+use CONTAINER_RUNTIME_BIN, so an Apple-container install works.
+
+HOST-SWEEP RACE -- decided, documented not coded. The 60s host sweep runs throughout a
+teardown. Runbook now opens with stopping the service (systemd unit nanoclaw-v2-b3501fc6,
+launchd equivalent given) and closes with starting it. No in-code coordination.
+
+INCIDENT during round 2: the fix agent's first reproduction attempt went through
+src/config.ts's process.cwd()-derived DATA_DIR and inserted a synthetic 'ag-keeper' row into
+the REAL data/v2.db. It caught and deleted the row itself. Independently verified afterwards
+by the orchestrator: agent_groups back to exactly 4 rows, zero keeper/ghost/synth residue in
+container_configs / messaging_group_agents / sessions / agent_destinations /
+agent_group_members, PRAGMA foreign_key_check clean, PRAGMA integrity_check ok, groups/ and
+data/v2-sessions/ untouched. Lesson for anyone testing this tool: a sandbox that imports
+src/config.ts is NOT a sandbox.
+
+KNOWN REMAINING GAP (filed as follow-up, not blocking): findOnecliAgent leaves unknown:false
+when 'onecli agents list' SUCCEEDS but returns unparseable output (JSON.parse throws). Only
+exec failure sets unknown. Narrower than the fixed case and pre-existing.
 <!-- SECTION:NOTES:END -->
