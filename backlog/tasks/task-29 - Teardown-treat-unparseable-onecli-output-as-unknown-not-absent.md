@@ -1,9 +1,11 @@
 ---
 id: TASK-29
 title: 'Teardown: treat unparseable onecli output as unknown, not absent'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-21 13:41'
+updated_date: '2026-08-22 14:36'
 labels: []
 dependencies: []
 ordinal: 29000
