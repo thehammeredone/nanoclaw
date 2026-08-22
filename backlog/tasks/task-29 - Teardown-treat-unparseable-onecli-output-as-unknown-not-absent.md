@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-08-21 13:41'
-updated_date: '2026-08-22 14:36'
+updated_date: '2026-08-22 14:56'
 labels: []
 dependencies: []
 ordinal: 29000
@@ -29,3 +29,9 @@ Same question likely applies to findImageTags if its output is ever malformed ra
 - [ ] #2 findImageTags audited for the same parse-vs-exec distinction and fixed if it shares the gap
 - [ ] #3 Test fixture default for unmocked onecli calls returns parseable output, and existing collectIncomplete assertions still pass
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Closed the parse-vs-exec gap in findOnecliAgent: a JSON.parse failure now sets unknown:true (AC#1). Review round 1 found the same silent-(none) hole still reachable through well-formed JSON of an unexpected shape ([], scalars, null, {data:{}}) — two of those additionally threw a TypeError out of planTeardown and surfaced as exit 1. A single shape guard (parsed is a non-null object with an Array data field) now routes all of them to unknown:true with an 'unexpected onecli agents list shape' warning. findImageTags was audited and deliberately left alone (AC#2): it never parses — docker --format output is split/trimmed/filtered, nothing can throw, and malformed-but-exit-0 output is indistinguishable from a genuine empty result, so an unknown state there would be a false-positive heuristic rather than a fix. findContainers shares that shape and was likewise left alone. The shared fakeExec default for unmocked 'onecli agents list' calls now returns JSON.stringify({data:[]}) (AC#3), which matches the real onecli envelope; no existing assertion was weakened or deleted (zero deletion lines in the test diff). Unknown-semantics wording was swept across the module header, the findOnecliAgent and TeardownPlan.onecliUnknown docstrings, the exit-code block in scripts/delete-agent-group.ts, and docs/runbooks/agent-group-teardown.md. 402 tests pass, tsc --noEmit clean.
+<!-- SECTION:NOTES:END -->
