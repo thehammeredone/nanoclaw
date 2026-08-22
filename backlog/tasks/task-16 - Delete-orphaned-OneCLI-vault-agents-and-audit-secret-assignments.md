@@ -1,9 +1,11 @@
 ---
 id: TASK-16
 title: Delete orphaned OneCLI vault agents and audit secret assignments
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-31 03:19'
+updated_date: '2026-08-22 17:50'
 labels:
   - security
 dependencies: []
