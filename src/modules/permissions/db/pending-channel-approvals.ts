@@ -51,10 +51,29 @@ export function hasInFlightChannelApproval(messagingGroupId: string): boolean {
   return row !== undefined;
 }
 
-export function updatePendingChannelApprovalCard(messagingGroupId: string, title: string, optionsJson: string): void {
+/**
+ * Also refreshes `created_at`. This table has no separate "last touched"
+ * column, and `created_at` is what the host-sweep GC (src/host-sweep.ts,
+ * `sweepExpiredPending`) ages rows off — nothing else reads it (checked:
+ * only the GC and the migrations that create the column touch it). Without
+ * this refresh, a card mid-flow (e.g. the "choose existing agent" follow-up)
+ * whose original card is already close to the 7-day TTL could get GC'd out
+ * from under the user's in-progress reply, which then silently no-ops
+ * against `awaitingNameInput` in src/modules/permissions/index.ts. Refreshing
+ * here makes the TTL measure time-since-last-interaction instead of
+ * time-since-creation.
+ */
+export function updatePendingChannelApprovalCard(
+  messagingGroupId: string,
+  title: string,
+  optionsJson: string,
+  updatedAt: string = new Date().toISOString(),
+): void {
   getDb()
-    .prepare('UPDATE pending_channel_approvals SET title = ?, options_json = ? WHERE messaging_group_id = ?')
-    .run(title, optionsJson, messagingGroupId);
+    .prepare(
+      'UPDATE pending_channel_approvals SET title = ?, options_json = ?, created_at = ? WHERE messaging_group_id = ?',
+    )
+    .run(title, optionsJson, updatedAt, messagingGroupId);
 }
 
 export function deletePendingChannelApproval(messagingGroupId: string): void {

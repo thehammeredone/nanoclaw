@@ -154,9 +154,45 @@ export function decideStuckAction(args: {
 // aged off `created_at` (NOT NULL on all four tables). Where an explicit
 // `expires_at` does exist — `pending_approvals`, populated from the OneCLI
 // gateway's own deadline (src/modules/approvals/onecli-approvals.ts:192) — it
-// wins in both directions: an earlier deadline expires the row early, a later
-// one holds it past the blanket TTL.
+// can only bring expiry *forward*, never push it back: an earlier deadline
+// expires the row early, but a later (or skewed/buggy) deadline can never
+// hold a row past the blanket TTL. The TTL is a hard ceiling, not a default.
 export const PENDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Cap on how many row ids get logged per GC'd table. The full count is always
+// logged; the id list is for spot-checking, not an audit trail — an unbounded
+// list turns one big backlog into an unbounded log line.
+const ID_LOG_SAMPLE = 10;
+
+// created_at for a given `pending_*` row only ever gets a single warn the
+// first time it's found unparseable; every subsequent tick for the same row
+// demotes to debug. Otherwise a single corrupt row (which is retained, not
+// deleted — see below) warns once a minute forever. Scoped per DB connection
+// via WeakMap so it naturally resets on process restart (matching "warn
+// again if this is still a problem next time we start up") and never leaks
+// across independent DB instances (e.g. in tests).
+const warnedUnparseableCreatedAt = new WeakMap<Database.Database, Set<string>>();
+
+function warnUnparseableCreatedAtOnce(
+  db: Database.Database,
+  table: string,
+  id: string,
+  createdAt: string,
+): void {
+  let seen = warnedUnparseableCreatedAt.get(db);
+  if (!seen) {
+    seen = new Set();
+    warnedUnparseableCreatedAt.set(db, seen);
+  }
+  const key = `${table}:${id}`;
+  const data = { table, id, createdAt };
+  if (seen.has(key)) {
+    log.debug('Pending GC: unparseable created_at, row retained (repeat)', data);
+    return;
+  }
+  seen.add(key);
+  log.warn('Pending GC: unparseable created_at, row retained', data);
+}
 
 interface PendingTableSpec {
   table: string;
@@ -187,53 +223,91 @@ const PENDING_TABLES: PendingTableSpec[] = [
  */
 export function sweepExpiredPending(db: Database.Database, now: number = Date.now()): Record<string, number> {
   const cutoff = now - PENDING_TTL_MS;
+  // Bind params for the SQL-side prefilter below. All four writers emit
+  // ISO-8601 (verified: src/delivery.ts:334, src/modules/approvals/onecli-
+  // approvals.ts:192, both permissions insert paths), so a lexicographic
+  // string comparison against another ISO-8601 string is equivalent to a
+  // chronological one — no need to parse in SQL.
+  const cutoffIso = new Date(cutoff).toISOString();
+  const nowIso = new Date(now).toISOString();
   const deleted: Record<string, number> = {};
 
   for (const spec of PENDING_TABLES) {
-    if (!hasTable(db, spec.table)) continue;
+    // Isolated per table: migration 003 was edited in place after release
+    // (see module-approvals-title-options.ts) and only title/options_json
+    // ever got a catch-up ALTER — an install that never ran that ALTER for
+    // some other column (e.g. expires_at) would throw here. Without this
+    // try/catch, one bad table silently skips the other three every tick.
+    try {
+      if (!hasTable(db, spec.table)) continue;
 
-    const cols = spec.hasExpiresAt
-      ? `${spec.idColumn} AS id, created_at, expires_at`
-      : `${spec.idColumn} AS id, created_at, NULL AS expires_at`;
-    const rows = db.prepare(`SELECT ${cols} FROM ${spec.table}`).all() as Array<{
-      id: string;
-      created_at: string;
-      expires_at: string | null;
-    }>;
+      const cols = spec.hasExpiresAt
+        ? `${spec.idColumn} AS id, created_at, expires_at`
+        : `${spec.idColumn} AS id, created_at, NULL AS expires_at`;
+      // Pushed-down prefilter: only rows that could plausibly be expired ever
+      // reach the JS parse/retain logic below. A row whose expires_at is
+      // already past always qualifies (the "bring expiry forward" case);
+      // everything else is gated on created_at < cutoff. Rows that fail this
+      // filter are left completely untouched — same outcome as before
+      // (retained), just without a query round-trip through JS for rows that
+      // plainly aren't candidates.
+      const where = spec.hasExpiresAt
+        ? `created_at < ? OR (expires_at IS NOT NULL AND expires_at < ?)`
+        : `created_at < ?`;
+      const params = spec.hasExpiresAt ? [cutoffIso, nowIso] : [cutoffIso];
+      const rows = db.prepare(`SELECT ${cols} FROM ${spec.table} WHERE ${where}`).all(...params) as Array<{
+        id: string;
+        created_at: string;
+        expires_at: string | null;
+      }>;
 
-    const expired: string[] = [];
-    for (const row of rows) {
-      const explicit = row.expires_at ? parseSqliteUtc(row.expires_at) : NaN;
-      if (!Number.isNaN(explicit)) {
-        // An explicit deadline is authoritative — never overridden by the TTL.
-        if (explicit < now) expired.push(row.id);
-        continue;
+      const expired: string[] = [];
+      for (const row of rows) {
+        const explicit = row.expires_at ? parseSqliteUtc(row.expires_at) : NaN;
+        if (!Number.isNaN(explicit) && explicit < now) {
+          // An explicit deadline in the past always expires the row — this is
+          // the "bring expiry forward" direction and is unconditional.
+          expired.push(row.id);
+          continue;
+        }
+
+        const createdAt = parseSqliteUtc(row.created_at);
+        // An unparseable created_at is left alone rather than guessed at; a
+        // wrong delete here is unrecoverable, a retained row is only clutter.
+        if (Number.isNaN(createdAt)) {
+          warnUnparseableCreatedAtOnce(db, spec.table, row.id, row.created_at);
+          continue;
+        }
+        // Ceiling: even a row with a future (or absent/unparseable) explicit
+        // expiry cannot outlive the blanket TTL measured off created_at. This
+        // is what stops a skewed or buggy gateway deadline from producing a
+        // permanently undeletable row.
+        if (createdAt < cutoff) expired.push(row.id);
       }
-      const createdAt = parseSqliteUtc(row.created_at);
-      // An unparseable created_at is left alone rather than guessed at; a
-      // wrong delete here is unrecoverable, a retained row is only clutter.
-      if (Number.isNaN(createdAt)) {
-        log.warn('Pending GC: unparseable created_at, row retained', {
-          table: spec.table,
-          id: row.id,
-          createdAt: row.created_at,
-        });
-        continue;
-      }
-      if (createdAt < cutoff) expired.push(row.id);
+
+      if (expired.length === 0) continue;
+
+      const stmt = db.prepare(`DELETE FROM ${spec.table} WHERE ${spec.idColumn} = ?`);
+      // One transaction per table instead of N implicit ones — deletes for a
+      // table either all land or none do, and it's a single fsync instead of
+      // `expired.length` of them on the live central DB inside the sweep tick.
+      const deleteAll = db.transaction((ids: string[]) => {
+        for (const id of ids) stmt.run(id);
+      });
+      deleteAll(expired);
+
+      deleted[spec.table] = expired.length;
+      log.info('Expired stale pending rows', {
+        table: spec.table,
+        count: expired.length,
+        // Bounded sample — the count above is the thing to alert on; the ids
+        // are for spot-checking, not an unbounded audit trail.
+        ids: expired.slice(0, ID_LOG_SAMPLE),
+        ttlMs: PENDING_TTL_MS,
+      });
+    } catch (err) {
+      log.error('Pending GC: table sweep failed, other tables unaffected', { table: spec.table, err });
     }
-
-    if (expired.length === 0) continue;
-
-    const stmt = db.prepare(`DELETE FROM ${spec.table} WHERE ${spec.idColumn} = ?`);
-    for (const id of expired) stmt.run(id);
-    deleted[spec.table] = expired.length;
-    log.info('Expired stale pending rows', {
-      table: spec.table,
-      count: expired.length,
-      ids: expired,
-      ttlMs: PENDING_TTL_MS,
-    });
   }
 
   return deleted;

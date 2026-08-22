@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 03:20'
-updated_date: '2026-08-22 20:26'
+updated_date: '2026-08-22 20:46'
 labels:
   - approvals
 dependencies: []
@@ -107,4 +107,26 @@ pnpm exec tsc --noEmit  → clean
 ```
 
 Commit: 6f0b48c7 on branch `task-18-expire-stale-pending-approval-rows-and-decide-on-a-gc-pass`.
+
+## Review-findings follow-up (task-18 review pass)
+
+Fixed 5 findings from code review on this branch:
+
+1. **Per-table isolation (Important)** — sweepExpiredPending's for-loop now wraps each table's body in try/catch; one table's SELECT/DELETE failure (e.g. a pre-007-migration install missing `expires_at` on `pending_approvals`) no longer skips the other three. Logged as `Pending GC: table sweep failed, other tables unaffected` with the table name.
+
+2. **Unparseable created_at warns forever (Important)** — added `warnUnparseableCreatedAtOnce`, a WeakMap<Database, Set<string>> keyed on `${table}:${id}`. First sighting is `log.warn`, every later tick for the same row is `log.debug`. Scoped per DB connection so it resets naturally on process restart and never leaks across test DB instances.
+
+3. **expires_at ceiling (Minor)** — corrected the doc comment's claimed semantics. Old: "wins in both directions... a later one holds it past the blanket TTL." New/actual: explicit expires_at can only bring expiry *forward* (a past deadline always expires the row); it can never push a row past the TTL ceiling measured off created_at. Predicate is now `explicit < now || createdAt < cutoff`. Replaced the old "extends past the TTL" test (which asserted the row survived) with a new one asserting the same row now gets deleted, plus added a "retains a row with future expires_at while inside the TTL" test for the still-valid normal case.
+
+4. **Mid-flow row can be GC'd (Minor)** — `updatePendingChannelApprovalCard` (src/modules/permissions/db/pending-channel-approvals.ts) now also refreshes `created_at` (new optional 4th param, defaults to `new Date().toISOString()`). Verified by grep that no other reader depends on the original creation timestamp for this table — only the GC and the migrations that add the column touch `created_at`. TTL now measures time-since-last-interaction for this table, closing the "choose existing agent" mid-flow GC hole.
+
+5. **Unbounded log / non-atomic deletes (Minor)** — each table's deletes now run inside a single `db.transaction(...)` instead of N implicit ones. Log line still reports the full count but caps the `ids` array at 10 (`ID_LOG_SAMPLE`).
+
+6. **Unpredicated full scan (Minor)** — pushed the age filter into SQL: `WHERE created_at < ?` (plus `OR (expires_at IS NOT NULL AND expires_at < ?)` for pending_approvals). Cutoff/now bound as ISO-8601 strings so the SQL-side lexicographic comparison matches chronological order for all four writers' timestamp format. In-JS parse/retain/warn-once logic is preserved for whatever rows the predicate returns.
+
+### Test evidence
+- Added 6 new tests to src/host-sweep.test.ts: per-table isolation, expires_at-ceiling (updated existing + new), unparseable-warn-once, transaction batching, id-log-cap, mid-flow created_at refresh. Total in that describe block: 35 (was ~25).
+- Mutation-checked by reverting src/host-sweep.ts and src/modules/permissions/db/pending-channel-approvals.ts to their pre-fix (HEAD) versions and re-running the new tests: all 5 behavioral tests (isolation, ceiling, warn-once, id-cap, mid-flow-refresh) failed as expected against the old code; restored the fix and all 35 passed again.
+- Full suite: `pnpm test` → 418 passed, 34 files. `pnpm exec tsc --noEmit` → clean, exit 0.
+- CLAUDE.md and docs/setup-wiring.md both only state the TTL generically ("pending_* GC (7-day TTL)") with no directional expires_at claim — no edit needed there. Grepped for other statements of the both-directions claim; only the host-sweep.ts comment block stated it, and that's now corrected.
 <!-- SECTION:NOTES:END -->
