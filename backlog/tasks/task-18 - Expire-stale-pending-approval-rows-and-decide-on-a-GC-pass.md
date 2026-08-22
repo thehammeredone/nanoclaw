@@ -1,9 +1,11 @@
 ---
 id: TASK-18
 title: Expire stale pending approval rows and decide on a GC pass
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-07-31 03:20'
+updated_date: '2026-08-22 20:19'
 labels:
   - approvals
 dependencies: []
