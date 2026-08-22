@@ -223,6 +223,49 @@ describe('findOnecliAgent', () => {
     expect(res.unknown).toBe(true);
     expect(res.warnings.join()).toMatch(/could not parse onecli agents list/);
   });
+
+  // Round-2 review of TASK-29: well-formed JSON of an unexpected shape hit the
+  // exact same silent-(none)/exit-0 hole the parse-failure fix was written to
+  // close, or threw an uncaught TypeError out of planTeardown. Each of these
+  // must resolve to unknown:true instead.
+
+  it('flags "could not check" for a bare-array payload', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: '[]', stderr: '' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list shape/);
+  });
+
+  it('flags "could not check" for a non-object scalar payload', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: '"a string"', stderr: '' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list shape/);
+
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: '42', stderr: '' } });
+    const res2 = findOnecliAgent(env, 'ag-doomed');
+    expect(res2.agent).toBeNull();
+    expect(res2.unknown).toBe(true);
+    expect(res2.warnings.join()).toMatch(/unexpected onecli agents list shape/);
+  });
+
+  it('flags "could not check" for a null payload instead of throwing', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: 'null', stderr: '' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list shape/);
+  });
+
+  it('flags "could not check" when "data" is present but not an array, instead of throwing', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: JSON.stringify({ data: {} }), stderr: '' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list shape/);
+  });
 });
 
 describe('onecliIdentifier', () => {

@@ -52,12 +52,15 @@
  *    credentials for a group that no longer exists. Discovery failure is
  *    surfaced as `(COULD NOT CHECK)` for containers, images AND the OneCLI
  *    agent, and all three are counted in `collectIncomplete` so the exit code
- *    reflects it too. This includes an exec that *succeeds* but returns output
- *    the parser cannot handle (TASK-29) — `findOnecliAgent` treats a
- *    `JSON.parse` failure identically to an exec failure, because both reach
- *    the same dangerous end state behind exit 0: a live vault agent reported
- *    as `(none)`. `findImageTags` has no equivalent parse step (its output is
- *    plain text, not JSON) so it does not share the gap — see its docstring.
+ *    reflects it too. This includes an exec that *succeeds* but returns
+ *    output that cannot be parsed or is not the expected shape (TASK-29,
+ *    round 2) — `findOnecliAgent` treats a `JSON.parse` failure, a
+ *    well-formed-but-unexpected value (a bare array, a scalar, `null`,
+ *    `{"data":{}}`), and an exec failure all the same way, because each
+ *    reaches the same dangerous end state behind exit 0: a live vault agent
+ *    reported as `(none)`. `findImageTags` has no equivalent parse step (its
+ *    output is plain text, not JSON) so it does not share the gap — see its
+ *    docstring.
  *
  * See `docs/runbooks/agent-group-teardown.md` for the operator-facing runbook
  * and the full deletion order with FK evidence.
@@ -169,8 +172,9 @@ export interface TeardownPlan {
   onecliAgent: { id: string; name: string; identifier: string } | null;
   /**
    * True when OneCLI discovery did not produce a usable answer — `onecli agents
-   * list` erroring, OR exiting 0 with output that cannot be parsed.
-   * `onecliAgent` is then "unknown", NOT "none" — see the module header.
+   * list` erroring, OR exiting 0 with output that cannot be parsed or is not
+   * the expected shape. `onecliAgent` is then "unknown", NOT "none" — see the
+   * module header.
    */
   onecliUnknown: boolean;
   /** Prose mentions of this group in surviving groups' instruction files. */
@@ -605,13 +609,17 @@ export function onecliIdentifier(agentGroupId: string): string {
 }
 
 /**
- * `unknown: true` means discovery did not run to a trustworthy result — either
- * the `onecli agents list` call itself failed, OR it exited 0 with output
- * `JSON.parse` cannot handle. Both must never be presented as "no vault agent
- * exists" — see the module header. Treating a parse failure as `unknown: false`
- * was the exact residual TASK-14 round-2 review found: a live vault agent
- * still holding injectable credentials for a deleted group, behind exit 0 —
- * reached through a parse failure instead of an exec failure.
+ * `unknown: true` means discovery did not run to a trustworthy result — the
+ * `onecli agents list` call itself failed, OR it exited 0 with output
+ * `JSON.parse` cannot handle, OR it exited 0 with valid JSON that is not the
+ * expected `{ data: [...] }` shape (e.g. a bare array, a scalar, `null`, or
+ * `{ data: {} }`). All three must never be presented as "no vault agent
+ * exists" — see the module header. Treating any of them as `unknown: false`
+ * (or letting a shape mismatch throw out of `findOnecliAgent` uncaught) is
+ * the exact residual TASK-14/TASK-29 review findings identified: a live
+ * vault agent still holding injectable credentials for a deleted group,
+ * behind exit 0 (or an uncaught exception mis-surfaced as exit 1) — reached
+ * through a parse failure or a shape mismatch instead of an exec failure.
  */
 export function findOnecliAgent(
   env: TeardownEnv,
@@ -625,7 +633,7 @@ export function findOnecliAgent(
       warnings: [`onecli agents list failed: ${res.stderr.trim() || 'unknown error'}`],
     };
   }
-  let parsed: { data?: { id: string; name: string; identifier: string; isDefault?: boolean }[] };
+  let parsed: unknown;
   try {
     parsed = JSON.parse(res.stdout);
   } catch (err) {
@@ -635,8 +643,16 @@ export function findOnecliAgent(
       warnings: [`could not parse onecli agents list: ${(err as Error).message}`],
     };
   }
+  if (parsed === null || typeof parsed !== 'object' || !Array.isArray((parsed as { data?: unknown }).data)) {
+    return {
+      agent: null,
+      unknown: true,
+      warnings: ['unexpected onecli agents list shape: expected an object with a "data" array'],
+    };
+  }
+  const data = (parsed as { data: { id: string; name: string; identifier: string; isDefault?: boolean }[] }).data;
   const wanted = onecliIdentifier(agentGroupId);
-  const match = (parsed.data ?? []).find((a) => a.identifier === wanted || a.identifier === agentGroupId);
+  const match = data.find((a) => a.identifier === wanted || a.identifier === agentGroupId);
   if (!match) return { agent: null, unknown: false, warnings: [] };
   if (match.isDefault) {
     return {
