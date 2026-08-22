@@ -173,12 +173,7 @@ const ID_LOG_SAMPLE = 10;
 // across independent DB instances (e.g. in tests).
 const warnedUnparseableCreatedAt = new WeakMap<Database.Database, Set<string>>();
 
-function warnUnparseableCreatedAtOnce(
-  db: Database.Database,
-  table: string,
-  id: string,
-  createdAt: string,
-): void {
+function warnUnparseableCreatedAtOnce(db: Database.Database, table: string, id: string, createdAt: string): void {
   let seen = warnedUnparseableCreatedAt.get(db);
   if (!seen) {
     seen = new Set();

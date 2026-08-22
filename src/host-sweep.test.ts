@@ -597,7 +597,9 @@ describe('sweepExpiredPending', () => {
     const deleted = sweepExpiredPending(db, NOW);
 
     expect(deleted).toEqual({ pending_sender_approvals: total });
-    const call = infoSpy.mock.calls.find((c) => (c[1] as Record<string, unknown>)?.table === 'pending_sender_approvals');
+    const call = infoSpy.mock.calls.find(
+      (c) => (c[1] as Record<string, unknown>)?.table === 'pending_sender_approvals',
+    );
     expect(call).toBeDefined();
     const data = call![1] as { count: number; ids: string[] };
     expect(data.count).toBe(total);
