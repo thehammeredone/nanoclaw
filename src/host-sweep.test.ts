@@ -438,12 +438,39 @@ describe('sweepExpiredPending', () => {
     expect(count(db, 'pending_approvals')).toBe(0);
   });
 
-  it('retains rows whose created_at cannot be parsed rather than guessing', () => {
+  it('retains rows whose created_at cannot be parsed rather than guessing, and warns once', () => {
     const db = freshDb();
     insertChannelApproval(db, 'not a date');
 
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
     expect(sweepExpiredPending(db, NOW)).toEqual({});
     expect(count(db, 'pending_channel_approvals')).toBe(1);
+    // Garbage created_at must be surfaced and warned about, not silently
+    // dropped by the SQL prefilter — see the regression test below.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    warnSpy.mockRestore();
+  });
+
+  it('surfaces and warns on garbage created_at that sorts lexicographically AFTER the cutoff (regression)', () => {
+    // 'zzzz' sorts *after* cutoffIso ('2026-08-15T12:00:00.000Z' starts with
+    // '2'; 'zzzz' starts with 'z'). A naive `created_at < ?` SQL prefilter
+    // never selects this row at all, so it never reaches the JS parse/
+    // retain/warn path — the warning never fires and the row is invisible
+    // to the GC forever, still holding its NO ACTION foreign key. Same
+    // contract as '0000-00-00' (which happens to sort *before* the cutoff),
+    // just approached from the other side of the string-comparison trap.
+    const db = freshDb();
+    insertChannelApproval(db, 'zzzz');
+
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+
+    warnSpy.mockRestore();
   });
 
   it('treats a timezone-less created_at as UTC (no TZ-dependent early delete)', () => {
@@ -544,10 +571,13 @@ describe('sweepExpiredPending', () => {
   });
 
   it('warns once for an unparseable created_at and demotes to debug on subsequent ticks', () => {
-    // "0000-00-00" sorts lexicographically before any real cutoff string
-    // (starts with '0'), so it survives the SQL prefilter and reaches the JS
-    // parse/retain path, same as a real corrupt row would if it happened to
-    // look old. Date.parse renders it NaN either way.
+    // "0000-00-00" is shaped like an ISO date (leading `YYYY-`) and sorts
+    // lexicographically before any real cutoff string (starts with '0'), so
+    // it reaches the SQL prefilter's `created_at < ?` branch on its own —
+    // no need for the not-well-formed OR clause here. It still fails
+    // Date.parse (renders NaN), so it reaches the JS parse/retain path the
+    // same as any other corrupt row. See the 'zzzz'/'not a date' tests
+    // above for garbage that only the not-well-formed OR clause surfaces.
     const db = freshDb();
     insertChannelApproval(db, '0000-00-00');
 
@@ -566,6 +596,42 @@ describe('sweepExpiredPending', () => {
     expect(count(db, 'pending_channel_approvals')).toBe(1);
     warnSpy.mockRestore();
     debugSpy.mockRestore();
+  });
+
+  it('classifies every created_at shape correctly: surfaced-and-warned vs genuinely-old-and-deleted vs retained silently', () => {
+    // The full contract, enumerated. NULL is not tested at the DB level —
+    // created_at is NOT NULL on all four tables (schema-enforced), so a
+    // real NULL row can never exist; the SQL prefilter's `IS NULL` arm is
+    // defensive only.
+    const db = freshDb();
+
+    // Surfaced (selected by the SQL prefilter) and warned-once, then
+    // retained — genuinely unparseable, in either sort direction relative
+    // to cutoffIso, plus the empty-string and epoch-integer shapes.
+    insertSenderApproval(db, 'garbage-empty', '');
+    insertSenderApproval(db, 'garbage-notadate', 'not a date');
+    insertSenderApproval(db, 'garbage-zzzz', 'zzzz');
+    insertSenderApproval(db, 'garbage-epoch', '1700000000000'); // epoch-as-text, no leading YYYY-
+
+    // Genuinely old and well-formed: deleted outright, no warn.
+    insertSenderApproval(db, 'old-bare-date', '2020-01-01'); // bare date, well past TTL
+
+    // Young and well-formed: untouched, no warn, not even selected by SQL.
+    insertSenderApproval(db, 'fresh', ago(DAY));
+
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    const deleted = sweepExpiredPending(db, NOW);
+
+    expect(deleted).toEqual({ pending_sender_approvals: 1 }); // only 'old-bare-date'
+    expect(warnSpy).toHaveBeenCalledTimes(4); // the four garbage rows, once each
+
+    const remainingIds = (
+      db.prepare('SELECT id FROM pending_sender_approvals ORDER BY id').all() as Array<{ id: string }>
+    ).map((r) => r.id);
+    expect(remainingIds).toEqual(['fresh', 'garbage-empty', 'garbage-epoch', 'garbage-notadate', 'garbage-zzzz']);
+
+    warnSpy.mockRestore();
   });
 
   it('deletes multiple expired rows in one table together (transaction-wrapped, not N implicit commits)', () => {

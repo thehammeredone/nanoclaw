@@ -222,8 +222,25 @@ export function sweepExpiredPending(db: Database.Database, now: number = Date.no
   // ISO-8601 (verified: src/delivery.ts:334, src/modules/approvals/onecli-
   // approvals.ts:192, both permissions insert paths), so a lexicographic
   // string comparison against another ISO-8601 string is equivalent to a
-  // chronological one — no need to parse in SQL.
+  // chronological one for well-formed rows — no need to parse in SQL.
+  //
+  // But `created_at < ?` alone is a trap for garbage rows: lexicographic
+  // comparison only agrees with chronological comparison when both sides
+  // are well-formed ISO-8601. A garbage value that happens to sort *at or
+  // after* cutoffIso (e.g. 'not a date', 'zzzz' — anything not starting
+  // with a digit) would fail `created_at < ?` and never be selected at all,
+  // so it would never reach the JS parse/retain/warn path below: no warning
+  // logged, retention invisible, row sits forever holding its NO ACTION FK.
+  // Garbage that happens to sort *before* cutoffIso (e.g. '0000-00-00') was
+  // already fine — it passes the filter and reaches the JS path. The fix is
+  // an OR'd shape check: anything that isn't NULL, isn't '', and doesn't
+  // even look like an ISO-8601 date (leading `YYYY-`) is surfaced
+  // regardless of where it happens to sort. This is a cheap heuristic, not
+  // a full date validator — a value shaped like a date but nonsensical
+  // (e.g. '9999-99-99') can still slip past if it sorts at/after cutoffIso;
+  // that's an accepted gap, not a claim of full coverage.
   const cutoffIso = new Date(cutoff).toISOString();
+  const notWellFormed = `created_at IS NULL OR created_at = '' OR created_at NOT GLOB '[0-9][0-9][0-9][0-9]-*'`;
   const nowIso = new Date(now).toISOString();
   const deleted: Record<string, number> = {};
 
@@ -239,16 +256,20 @@ export function sweepExpiredPending(db: Database.Database, now: number = Date.no
       const cols = spec.hasExpiresAt
         ? `${spec.idColumn} AS id, created_at, expires_at`
         : `${spec.idColumn} AS id, created_at, NULL AS expires_at`;
-      // Pushed-down prefilter: only rows that could plausibly be expired ever
-      // reach the JS parse/retain logic below. A row whose expires_at is
-      // already past always qualifies (the "bring expiry forward" case);
-      // everything else is gated on created_at < cutoff. Rows that fail this
-      // filter are left completely untouched — same outcome as before
-      // (retained), just without a query round-trip through JS for rows that
-      // plainly aren't candidates.
+      // Pushed-down prefilter: only rows that could plausibly be expired, or
+      // that need to be surfaced for the unparseable-created_at warn path,
+      // ever reach the JS logic below. A row whose expires_at is already
+      // past always qualifies (the "bring expiry forward" case); a
+      // well-formed created_at is gated on created_at < cutoff; anything
+      // that isn't a well-formed ISO-8601 timestamp (NULL, '', or no
+      // leading `YYYY-`) is also selected so it reaches the warn/retain
+      // path below instead of being silently hidden by the string
+      // comparison. Rows that still fail this filter are genuinely young,
+      // well-formed, and untouched — same as before, just without a query
+      // round-trip through JS for rows that plainly aren't candidates.
       const where = spec.hasExpiresAt
-        ? `created_at < ? OR (expires_at IS NOT NULL AND expires_at < ?)`
-        : `created_at < ?`;
+        ? `(created_at < ? OR ${notWellFormed}) OR (expires_at IS NOT NULL AND expires_at < ?)`
+        : `created_at < ? OR ${notWellFormed}`;
       const params = spec.hasExpiresAt ? [cutoffIso, nowIso] : [cutoffIso];
       const rows = db.prepare(`SELECT ${cols} FROM ${spec.table} WHERE ${where}`).all(...params) as Array<{
         id: string;
