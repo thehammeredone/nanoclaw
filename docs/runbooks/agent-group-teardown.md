@@ -40,7 +40,7 @@ Flags: `--yes` (execute), `--folder <name>`, `--keep-onecli`, `--keep-images`.
 |---|---|
 | `0` | Plan printed (dry run), or executed with **every** step complete. |
 | `1` | Usage error, or the target could not be resolved. Nothing ran. |
-| `2` | Executed but **incomplete**. The DB half committed; at least one of the group directory, session directory, image tag, container stop or OneCLI vault agent was not dealt with — including cases where discovery itself failed (e.g. `docker`/`onecli` unreachable), which counts as incomplete even though nothing was "attempted and failed" in the usual sense. The `INCOMPLETE` block lists what. |
+| `2` | Executed but **incomplete**. The DB half committed; at least one of the group directory, session directory, image tag, container stop or OneCLI vault agent was not dealt with — including cases where discovery itself failed (e.g. `docker`/`onecli` unreachable, or `onecli` exiting 0 with output that cannot be parsed), which counts as incomplete even though nothing was "attempted and failed" in the usual sense. The `INCOMPLETE` block lists what. |
 
 Never read `2` as success. The dangerous residue is the OneCLI vault agent: it
 still holds injectable credentials for a group that no longer exists.
@@ -239,7 +239,7 @@ caller.
   non-zero exit, so it is `(COULD NOT CHECK …)` too, not `(none)`. Otherwise an
   operator would approve deleting rows and session directories out from under a
   live container, or leave a vault agent still holding injectable credentials
-  for a deleted group. All three failure modes are counted in
+  for a deleted group. Every one of these discovery failures is counted in
   `collectIncomplete`, so the exit code is `2`, not `0`.
 - **Container matching is anchored**: `^nanoclaw-v2-<folder>-\d+$`, so folder
   `foo` never matches container `nanoclaw-v2-foo-2-<ts>`.

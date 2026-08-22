@@ -33,7 +33,8 @@
  *   2  executed but INCOMPLETE — the DB half committed, but at least one of
  *      the group directory, session directory, image tag, container stop or
  *      OneCLI vault agent was not dealt with — including when discovery of an
- *      image tag or the vault agent itself failed (docker/onecli unreachable).
+ *      image tag or the vault agent itself failed: docker/onecli unreachable,
+ *      or onecli exiting 0 with output that cannot be parsed.
  *      Read the INCOMPLETE block and re-run. Never treat 2 as success: a
  *      surviving OneCLI agent still holds injectable credentials for a group
  *      that no longer exists.

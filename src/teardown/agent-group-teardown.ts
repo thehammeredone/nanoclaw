@@ -168,7 +168,8 @@ export interface TeardownPlan {
   /** OneCLI vault agent to delete, if found. */
   onecliAgent: { id: string; name: string; identifier: string } | null;
   /**
-   * True when OneCLI discovery could not run (`onecli agents list` erroring).
+   * True when OneCLI discovery did not produce a usable answer — `onecli agents
+   * list` erroring, OR exiting 0 with output that cannot be parsed.
    * `onecliAgent` is then "unknown", NOT "none" — see the module header.
    */
   onecliUnknown: boolean;
