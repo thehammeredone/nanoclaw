@@ -234,9 +234,12 @@ caller.
 - **A failed check is not an empty result.** If the container runtime or
   `onecli` is missing or errors, the plan prints `(COULD NOT CHECK …)` for
   containers, docker images, and the OneCLI vault agent — never `(none)`.
-  Otherwise an operator would approve deleting rows and session directories out
-  from under a live container, or leave a vault agent still holding injectable
-  credentials for a deleted group. All three failure modes are counted in
+  This also covers a `onecli agents list` call that exits 0 but returns output
+  `JSON.parse` cannot handle — that is discovery failing just as surely as a
+  non-zero exit, so it is `(COULD NOT CHECK …)` too, not `(none)`. Otherwise an
+  operator would approve deleting rows and session directories out from under a
+  live container, or leave a vault agent still holding injectable credentials
+  for a deleted group. All three failure modes are counted in
   `collectIncomplete`, so the exit code is `2`, not `0`.
 - **Container matching is anchored**: `^nanoclaw-v2-<folder>-\d+$`, so folder
   `foo` never matches container `nanoclaw-v2-foo-2-<ts>`.

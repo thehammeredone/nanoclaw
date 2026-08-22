@@ -41,6 +41,15 @@ function fakeExec(responses: Record<string, ExecResult> = {}) {
     for (const [prefix, res] of Object.entries(responses)) {
       if (key.startsWith(prefix)) return res;
     }
+    // Default to parseable JSON for an unmocked `onecli agents list` — an
+    // empty string is valid stdout for `docker ps`/`docker images` (no
+    // parsing happens there) but is NOT valid JSON, so leaving it as the
+    // catch-all default would make every unmocked onecli call in this file
+    // trip findOnecliAgent's parse-failure → unknown:true path and get
+    // flagged by collectIncomplete.
+    if (key.startsWith('onecli agents list')) {
+      return { ok: true, stdout: JSON.stringify({ data: [] }), stderr: '' };
+    }
     return { ok: true, stdout: '', stderr: '' };
   };
 }
@@ -203,6 +212,17 @@ describe('findOnecliAgent', () => {
     const res = findOnecliAgent(env, 'ag-doomed');
     expect(res).toEqual({ agent: null, unknown: false, warnings: [] });
   });
+
+  it('flags "could not check" when the call succeeds but the output cannot be parsed (TASK-29)', () => {
+    // exit 0 with garbage stdout — the round-2 fix only caught the exec-failure
+    // half of this bug class. A live vault agent must not read as "(none)"
+    // just because it was reached through a parse failure instead.
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: 'not json', stderr: '' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/could not parse onecli agents list/);
+  });
 });
 
 describe('onecliIdentifier', () => {
@@ -349,6 +369,15 @@ describe('planTeardown', () => {
 
   it('reports failed OneCLI discovery as unknown, never as none', () => {
     env.exec = fakeExec({ 'onecli agents list': { ok: false, stdout: '', stderr: 'gateway unreachable' } });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    expect(plan.onecliAgent).toBeNull();
+    expect(plan.onecliUnknown).toBe(true);
+    const text = renderPlan(plan);
+    expect(text).toMatch(/WILL DELETE — OneCLI vault agent\n─+\n {2}\(COULD NOT CHECK/);
+  });
+
+  it('reports unparseable OneCLI output as unknown, never as none (TASK-29)', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: '{not valid json', stderr: '' } });
     const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
     expect(plan.onecliAgent).toBeNull();
     expect(plan.onecliUnknown).toBe(true);
@@ -628,6 +657,17 @@ describe('collectIncomplete (drives the scripts exit code)', () => {
     env.exec = fakeExec({ 'onecli agents list': { ok: false, stdout: '', stderr: 'gateway unreachable' } });
     const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
     const result = executeTeardown(db, env, plan);
+    expect(collectIncomplete(plan, result).join('\n')).toMatch(/delete-onecli-agent: could not check/);
+  });
+
+  it('an unparseable-but-successful OneCLI response is INCOMPLETE, not a silent (none) (TASK-29)', () => {
+    // exit 0, garbage stdout — the parse-failure half of the round-2 bug class.
+    // Same end state as an exec failure: a live vault agent could still be
+    // holding injectable credentials for this deleted group.
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: '<<not json>>', stderr: '' } });
+    const plan = planTeardown(db, env, { agentGroupId: 'ag-doomed' });
+    const result = executeTeardown(db, env, plan);
+    expect(plan.onecliUnknown).toBe(true);
     expect(collectIncomplete(plan, result).join('\n')).toMatch(/delete-onecli-agent: could not check/);
   });
 

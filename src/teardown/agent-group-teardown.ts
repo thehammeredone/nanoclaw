@@ -52,7 +52,12 @@
  *    credentials for a group that no longer exists. Discovery failure is
  *    surfaced as `(COULD NOT CHECK)` for containers, images AND the OneCLI
  *    agent, and all three are counted in `collectIncomplete` so the exit code
- *    reflects it too.
+ *    reflects it too. This includes an exec that *succeeds* but returns output
+ *    the parser cannot handle (TASK-29) — `findOnecliAgent` treats a
+ *    `JSON.parse` failure identically to an exec failure, because both reach
+ *    the same dangerous end state behind exit 0: a live vault agent reported
+ *    as `(none)`. `findImageTags` has no equivalent parse step (its output is
+ *    plain text, not JSON) so it does not share the gap — see its docstring.
  *
  * See `docs/runbooks/agent-group-teardown.md` for the operator-facing runbook
  * and the full deletion order with FK evidence.
@@ -558,6 +563,15 @@ export function findContainers(
  *
  * `unknown: true` means discovery did not run — the runtime binary failed. It
  * must never be presented as "no image tag exists" — see the module header.
+ *
+ * Audited for the same parse-vs-exec gap `findOnecliAgent` had (TASK-29): there
+ * is no parse step here that can fail. `--format '{{.Repository}}:{{.Tag}}'`
+ * output is plain newline-delimited text, split/trimmed/filtered into a Set of
+ * raw strings — none of which can throw on malformed input, unlike
+ * `JSON.parse`. Garbage output just becomes a Set of strings that won't match
+ * our candidate tag, which is indistinguishable from "checked, no tag exists"
+ * — there is no exception to catch and no separate error state to surface. No
+ * change needed here.
  */
 export function findImageTags(
   env: TeardownEnv,
@@ -590,12 +604,13 @@ export function onecliIdentifier(agentGroupId: string): string {
 }
 
 /**
- * `unknown: true` means the `onecli agents list` call itself failed — discovery
- * did not run. It must never be presented as "no vault agent exists" — see the
- * module header. A successful call that fails to parse still returns
- * `unknown: false` (matching the pre-existing behaviour); the exec-failure case
- * is what round-2 review found silently exiting 0 with a live vault agent left
- * behind.
+ * `unknown: true` means discovery did not run to a trustworthy result — either
+ * the `onecli agents list` call itself failed, OR it exited 0 with output
+ * `JSON.parse` cannot handle. Both must never be presented as "no vault agent
+ * exists" — see the module header. Treating a parse failure as `unknown: false`
+ * was the exact residual TASK-14 round-2 review found: a live vault agent
+ * still holding injectable credentials for a deleted group, behind exit 0 —
+ * reached through a parse failure instead of an exec failure.
  */
 export function findOnecliAgent(
   env: TeardownEnv,
@@ -613,7 +628,11 @@ export function findOnecliAgent(
   try {
     parsed = JSON.parse(res.stdout);
   } catch (err) {
-    return { agent: null, unknown: false, warnings: [`could not parse onecli agents list: ${(err as Error).message}`] };
+    return {
+      agent: null,
+      unknown: true,
+      warnings: [`could not parse onecli agents list: ${(err as Error).message}`],
+    };
   }
   const wanted = onecliIdentifier(agentGroupId);
   const match = (parsed.data ?? []).find((a) => a.identifier === wanted || a.identifier === agentGroupId);
