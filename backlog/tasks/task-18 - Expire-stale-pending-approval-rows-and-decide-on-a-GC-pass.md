@@ -1,11 +1,11 @@
 ---
 id: TASK-18
 title: Expire stale pending approval rows and decide on a GC pass
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 03:20'
-updated_date: '2026-08-22 20:54'
+updated_date: '2026-08-22 20:55'
 labels:
   - approvals
 dependencies: []
@@ -34,10 +34,16 @@ Note that these tables also matter for teardown: pending_questions references se
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The stale 2026-07-09 pending_channel_approvals row is cleared
-- [ ] #2 Answered whether a stale approval is still actionable
-- [ ] #3 GC/TTL for the pending_* tables either implemented in host-sweep or explicitly declined with a reason
+- [x] #1 The stale 2026-07-09 pending_channel_approvals row is cleared
+- [x] #2 Answered whether a stale approval is still actionable
+- [x] #3 GC/TTL for the pending_* tables either implemented in host-sweep or explicitly declined with a reason
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -132,3 +138,9 @@ Fixed 5 findings from code review on this branch:
 
 Round-2 fix (commit bef42fa7): the round-1 SQL prefilter `created_at < ?` is a lexicographic string comparison, so garbage that sorts at/after cutoffIso ('not a date', 'zzzz') was never SELECTed at all -- never warned, never surfaced, retained invisibly forever, still holding its NO ACTION FK. Fixed by OR'ing in a shape check: created_at IS NULL OR created_at = '' OR created_at NOT GLOB '[0-9][0-9][0-9][0-9]-*' (src/host-sweep.ts, sweepExpiredPending). Contract verified across shapes: NULL -- schema-enforced NOT NULL on all 4 tables, unreachable at DB level, defensive-only in code; '' -- surfaced+warned+retained; '0000-00-00' -- surfaced+warned+retained (was already reachable, sorts before cutoff); 'not a date' -- surfaced+warned+retained (previously invisible, now fixed); 'zzzz' -- surfaced+warned+retained (previously invisible, now fixed -- this was the regression); '2020-01-01' bare date well past TTL -- genuinely-old, deleted, no warn; epoch-integer-as-text e.g. '1700000000000' -- surfaced+warned+retained (no leading YYYY-, fails GLOB). Known accepted gap noted in code comment: a value shaped like a date but nonsensical (e.g. '9999-99-99') can still slip past silently if it sorts at/after cutoffIso -- heuristic shape check, not a full date validator. Wrote failing regression test first (zzzz case), confirmed it failed against pre-fix HEAD (AssertionError: expected warn called 1 times, got 0), then fixed. Corrected two masking tests: '0000-00-00' test comment no longer claims the filter is expected to hide garbage; 'not a date' test now asserts warn called once. Added a comprehensive shape-classification test enumerating all shapes above. grepped docs/ and CLAUDE.md for other statements of this created_at/parse semantics -- none found outside src/host-sweep.ts itself and its own test file; docs/db-central.md (referenced by this task) only documents schema/FK shape, no GC semantics to reconcile. Verification: pnpm exec vitest run src/host-sweep.test.ts -> 37/37 passed; pnpm test -> 420/420 passed across 34 files; pnpm exec tsc --noEmit -> clean, exit 0.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Gave the four central-DB pending_* tables a garbage collector, and answered the question the task was really about: a stale approval is NOT inert. Re-traced independently in review — the button payload 'ncq:<questionId>:<idx>' lives in the persisted platform message and is resolved on click by direct primary-key lookup (chat-sdk-bridge.ts:277-306 -> sessions.ts:196-227 -> permissions/index.ts:311). No timestamp is compared anywhere, so a weeks-old card is still live; deleting the row is the only thing that makes it inert. Picking an option naming a deleted agent group is already guarded (permissions/index.ts:432) and is a logged no-op rather than an FK error, so the damage is not the dangling-wiring the task feared: it is that picking a SURVIVING group replays a weeks-old stored message as live inbound, and that the unresolved row doubles as the in-flight dedup key (channel-approval.ts:131, sender-approval.ts:59), silently suppressing every future card for that channel or sender for as long as it lives. That makes this a correctness bug, not clutter — which is why AC#3 was implemented rather than declined. sweepExpiredPending(db, now) runs once per 60s tick from sweep(), before the per-session loop, against the central DB only, with per-table try/catch so one bad table cannot skip the other three (the first table, pending_approvals, is the one whose SELECT names a column that is not guaranteed to exist — migration 003 was edited in place after release, which is why module-approvals-title-options.ts exists). TTL is 7 days as a single exported PENDING_TTL_MS: long enough to survive a human away for a long weekend, short enough to stay inside the horizon over which the agent roster a card was rendered against changes. Rows age off created_at with no schema change; an explicit pending_approvals.expires_at can bring expiry forward but not push it past the TTL, so a skewed gateway deadline cannot mint a permanently undeletable row. Deletes are wrapped per table in db.transaction and logged with the full count plus a bounded sample of ids. Two holes found in review and closed: updatePendingChannelApprovalCard now refreshes the activity timestamp, so a 'choose existing agent' follow-up on day ~6.9 can no longer be collected mid-flow and swallowed by the awaitingNameInput interceptor; and the SQL prefilter, which was added for performance, now ORs in a well-formedness check (created_at IS NULL OR = '' OR NOT GLOB '[0-9][0-9][0-9][0-9]-*') because 'created_at < ?' is a lexicographic comparison and garbage sorting at or after the cutoff — 'not a date', 'zzzz' — was being hidden from the parse-and-warn path entirely rather than surfaced and retained. Unparseable timestamps are surfaced, warned about exactly once per table per DB, and retained, never deleted. AC#1 needed no action: the stale 2026-07-09 row was already cleared by earlier teardown work and all four tables verified at 0 rows, read-only. Known accepted gap, documented in the code: a date-shaped but nonsensical value such as '9999-99-99' can still slip past silently — the check is a shape heuristic, not a validator. 420 tests pass across 34 files; tsc --noEmit clean.
+<!-- SECTION:FINAL_SUMMARY:END -->
