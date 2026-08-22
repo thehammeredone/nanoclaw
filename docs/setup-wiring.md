@@ -94,7 +94,7 @@ Channel adapter → routeInbound() → resolve messaging_group → resolve agent
 | `src/router.ts` | Inbound routing, auto-creates messaging groups |
 | `src/session-manager.ts` | Creates inbound.db + outbound.db per session |
 | `src/delivery.ts` | Polls outbound.db, delivers, handles system actions |
-| `src/host-sweep.ts` | Syncs processing_ack, stale detection, recurrence |
+| `src/host-sweep.ts` | Syncs processing_ack, stale detection, recurrence, `pending_*` GC (7-day TTL) |
 | `src/container-runner.ts` | Spawns containers, OneCLI ensureAgent + applyContainerConfig |
 | `setup/register.ts` | Creates entities (agent_group, messaging_group, wiring) |
 | `setup/verify.ts` | Checks central DB for registered groups |

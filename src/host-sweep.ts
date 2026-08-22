@@ -25,12 +25,17 @@
  *        (claim_age > tolerance) AND (heartbeat_mtime <= status_changed)
  *        → kill + reset this message + tries++. Semantics: "container
  *        claimed a message and went quiet past tolerance since the claim."
+ *
+ * Also runs a once-per-tick GC over the central DB's four `pending_*` tables
+ * (approval / question cards that were never answered). See the
+ * `PENDING_TTL_MS` comment block below for why they need one.
  */
 import type Database from 'better-sqlite3';
 import fs from 'fs';
 
 import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getDb, hasTable } from './db/connection.js';
 import {
   countDueMessages,
   deleteOrphanProcessingClaims,
@@ -117,6 +122,123 @@ export function decideStuckAction(args: {
   return { action: 'ok' };
 }
 
+// ── Pending-approval GC ─────────────────────────────────────────────────────
+//
+// Approval cards are fully DB-backed and never expire on their own. The
+// button's platform payload is `ncq:<questionId>:<optionIndex>` and the
+// option list is re-read from the row's `options_json` on click
+// (src/db/sessions.ts:200 getAskQuestionRender), so a card stays clickable
+// for as long as the row exists — across host restarts, indefinitely. Three
+// concrete failures follow from that:
+//
+//   1. A card renders a roster (e.g. "connect this channel to <agent>") that
+//      goes stale. Selecting a deleted agent group is guarded
+//      (src/modules/permissions/index.ts:432) but selecting a *surviving* one
+//      replays a weeks-old stored message as if it just arrived.
+//   2. `pending_channel_approvals` (PK messaging_group_id) and
+//      `pending_sender_approvals` (UNIQUE messaging_group_id, sender_identity)
+//      double as in-flight dedup keys. A row that is never resolved silently
+//      suppresses every future approval card for that channel/sender.
+//   3. All four tables hold `NO ACTION` foreign keys (to agent_groups and/or
+//      sessions), so a forgotten row blocks agent-group and session deletion
+//      — see docs/runbooks/agent-group-teardown.md.
+//
+// TTL: 7 days. The window has to cover a human who is away for a long weekend
+// or a short holiday and comes back to an unanswered card, while staying well
+// inside the horizon over which the roster the card was rendered against can
+// change. The row that motivated this was 3 weeks old.
+//
+// No schema change: `pending_channel_approvals`, `pending_sender_approvals`
+// and `pending_questions` have no `expires_at` column, and adding one would
+// put the policy on every insert path instead of in one place here. Rows are
+// aged off `created_at` (NOT NULL on all four tables). Where an explicit
+// `expires_at` does exist — `pending_approvals`, populated from the OneCLI
+// gateway's own deadline (src/modules/approvals/onecli-approvals.ts:192) — it
+// wins in both directions: an earlier deadline expires the row early, a later
+// one holds it past the blanket TTL.
+export const PENDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface PendingTableSpec {
+  table: string;
+  /** Primary-key column, used to delete and to name rows in the log. */
+  idColumn: string;
+  /** Whether the table carries an explicit per-row deadline. */
+  hasExpiresAt?: boolean;
+}
+
+// `pending_questions` is included deliberately. It is the odd one out — it
+// references sessions(id) and has no agent_group_id, so it is invisible to
+// every group-scoped sweep and is exactly the row that blocks a session
+// delete during teardown. Nothing references pending_questions in turn, so
+// aging it off is safe; the only effect is that a click on a long-dead
+// question card becomes an "Unclaimed response" warn instead of waking a
+// session that has moved on.
+const PENDING_TABLES: PendingTableSpec[] = [
+  { table: 'pending_approvals', idColumn: 'approval_id', hasExpiresAt: true },
+  { table: 'pending_questions', idColumn: 'question_id' },
+  { table: 'pending_sender_approvals', idColumn: 'id' },
+  { table: 'pending_channel_approvals', idColumn: 'messaging_group_id' },
+];
+
+/**
+ * Delete pending approval/question rows that have outlived their usefulness.
+ * Returns the per-table count of deleted rows (tables with nothing to delete
+ * are omitted) so callers and tests can assert on what happened.
+ */
+export function sweepExpiredPending(db: Database.Database, now: number = Date.now()): Record<string, number> {
+  const cutoff = now - PENDING_TTL_MS;
+  const deleted: Record<string, number> = {};
+
+  for (const spec of PENDING_TABLES) {
+    if (!hasTable(db, spec.table)) continue;
+
+    const cols = spec.hasExpiresAt
+      ? `${spec.idColumn} AS id, created_at, expires_at`
+      : `${spec.idColumn} AS id, created_at, NULL AS expires_at`;
+    const rows = db.prepare(`SELECT ${cols} FROM ${spec.table}`).all() as Array<{
+      id: string;
+      created_at: string;
+      expires_at: string | null;
+    }>;
+
+    const expired: string[] = [];
+    for (const row of rows) {
+      const explicit = row.expires_at ? parseSqliteUtc(row.expires_at) : NaN;
+      if (!Number.isNaN(explicit)) {
+        // An explicit deadline is authoritative — never overridden by the TTL.
+        if (explicit < now) expired.push(row.id);
+        continue;
+      }
+      const createdAt = parseSqliteUtc(row.created_at);
+      // An unparseable created_at is left alone rather than guessed at; a
+      // wrong delete here is unrecoverable, a retained row is only clutter.
+      if (Number.isNaN(createdAt)) {
+        log.warn('Pending GC: unparseable created_at, row retained', {
+          table: spec.table,
+          id: row.id,
+          createdAt: row.created_at,
+        });
+        continue;
+      }
+      if (createdAt < cutoff) expired.push(row.id);
+    }
+
+    if (expired.length === 0) continue;
+
+    const stmt = db.prepare(`DELETE FROM ${spec.table} WHERE ${spec.idColumn} = ?`);
+    for (const id of expired) stmt.run(id);
+    deleted[spec.table] = expired.length;
+    log.info('Expired stale pending rows', {
+      table: spec.table,
+      count: expired.length,
+      ids: expired,
+      ttlMs: PENDING_TTL_MS,
+    });
+  }
+
+  return deleted;
+}
+
 let running = false;
 
 export function startHostSweep(): void {
@@ -131,6 +253,15 @@ export function stopHostSweep(): void {
 
 async function sweep(): Promise<void> {
   if (!running) return;
+
+  // Central-DB GC runs once per tick, not per session — these tables live in
+  // data/v2.db. Isolated in its own try so a GC failure can't skip the
+  // per-session maintenance below.
+  try {
+    sweepExpiredPending(getDb());
+  } catch (err) {
+    log.error('Pending GC error', { err });
+  }
 
   try {
     const sessions = getActiveSessions();

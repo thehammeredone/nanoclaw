@@ -4,15 +4,19 @@
  * don't have to mock the filesystem or the container runner.
  */
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
+import { closeDb, initTestDb } from './db/connection.js';
+import { runMigrations } from './db/migrations/index.js';
 import { deleteOrphanProcessingClaims, getProcessingClaims } from './db/session-db.js';
 import {
   ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
+  PENDING_TTL_MS,
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
   parseSqliteUtc,
+  sweepExpiredPending,
 } from './host-sweep.js';
 import type { Session } from './types.js';
 
@@ -291,6 +295,189 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
     expect(getProcessingClaims(outDb)).toEqual([]);
     const row = inDb.prepare('SELECT tries FROM messages_in WHERE id = ?').get('m-2') as { tries: number };
     expect(row.tries).toBe(1); // not bumped, the skip path held
+  });
+});
+
+describe('sweepExpiredPending', () => {
+  // Real schema from the real migration chain against a temp DB — the FK
+  // graph (pending_* → agent_groups / messaging_groups / sessions) is the
+  // thing under test as much as the TTL arithmetic is.
+  const NOW = Date.parse('2026-08-22T12:00:00.000Z');
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+  const ahead = (ms: number) => new Date(NOW + ms).toISOString();
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function freshDb(): Database.Database {
+    const db = initTestDb();
+    runMigrations(db);
+    db.prepare("INSERT INTO agent_groups VALUES ('ag-1', 'Agent One', 'agent-one', NULL, ?)").run(ago(90 * DAY));
+    db.prepare(
+      "INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at) VALUES ('mg-1', 'matrix', '!room:example.org', 'Room', 0, 'strict', ?)",
+    ).run(ago(90 * DAY));
+    db.prepare(
+      "INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at) VALUES ('sess-1', 'ag-1', 'mg-1', NULL, NULL, 'active', 'stopped', ?, ?)",
+    ).run(ago(90 * DAY), ago(90 * DAY));
+    return db;
+  }
+
+  function insertChannelApproval(db: Database.Database, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO pending_channel_approvals
+         (messaging_group_id, agent_group_id, original_message, approver_user_id, created_at, title, options_json)
+       VALUES ('mg-1', 'ag-1', '{}', 'matrix:@hammer:example.org', ?, 'Card', '[]')`,
+    ).run(createdAt);
+  }
+
+  function insertSenderApproval(db: Database.Database, id: string, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO pending_sender_approvals
+         (id, messaging_group_id, agent_group_id, sender_identity, sender_name, original_message,
+          approver_user_id, created_at, title, options_json)
+       VALUES (?, 'mg-1', 'ag-1', ?, 'Someone', '{}', 'matrix:@hammer:example.org', ?, 'Card', '[]')`,
+    ).run(id, `matrix:@${id}:example.org`, createdAt);
+  }
+
+  function insertQuestion(db: Database.Database, id: string, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO pending_questions
+         (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, options_json, created_at)
+       VALUES (?, 'sess-1', 'mo-1', '!room:example.org', 'matrix', NULL, 'Q', '[]', ?)`,
+    ).run(id, createdAt);
+  }
+
+  function insertApproval(db: Database.Database, id: string, createdAt: string, expiresAt: string | null): void {
+    db.prepare(
+      `INSERT INTO pending_approvals
+         (approval_id, session_id, request_id, action, payload, created_at, agent_group_id,
+          channel_type, platform_id, platform_message_id, expires_at, status, title, options_json)
+       VALUES (?, 'sess-1', 'req-1', 'install_packages', '{}', ?, 'ag-1', 'matrix',
+               '!room:example.org', NULL, ?, 'pending', 'Card', '[]')`,
+    ).run(id, createdAt, expiresAt);
+  }
+
+  const count = (db: Database.Database, table: string): number =>
+    (db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
+
+  afterEach(() => {
+    closeDb();
+  });
+
+  it('deletes rows older than the TTL across all four pending_* tables', () => {
+    const db = freshDb();
+    const stale = ago(PENDING_TTL_MS + DAY);
+    insertChannelApproval(db, stale);
+    insertSenderApproval(db, 'psa-old', stale);
+    insertQuestion(db, 'pq-old', stale);
+    insertApproval(db, 'pa-old', stale, null);
+
+    const deleted = sweepExpiredPending(db, NOW);
+
+    expect(deleted).toEqual({
+      pending_approvals: 1,
+      pending_questions: 1,
+      pending_sender_approvals: 1,
+      pending_channel_approvals: 1,
+    });
+    expect(count(db, 'pending_channel_approvals')).toBe(0);
+    expect(count(db, 'pending_sender_approvals')).toBe(0);
+    expect(count(db, 'pending_questions')).toBe(0);
+    expect(count(db, 'pending_approvals')).toBe(0);
+  });
+
+  it('leaves rows inside the TTL alone', () => {
+    const db = freshDb();
+    const fresh = ago(PENDING_TTL_MS - DAY);
+    insertChannelApproval(db, fresh);
+    insertSenderApproval(db, 'psa-new', fresh);
+    insertQuestion(db, 'pq-new', fresh);
+    insertApproval(db, 'pa-new', fresh, null);
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+    expect(count(db, 'pending_sender_approvals')).toBe(1);
+    expect(count(db, 'pending_questions')).toBe(1);
+    expect(count(db, 'pending_approvals')).toBe(1);
+  });
+
+  it('is a no-op on empty tables (the current live state)', () => {
+    const db = freshDb();
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+  });
+
+  it('honours an explicit expires_at that fires before the TTL', () => {
+    // pending_approvals rows from the OneCLI gateway carry the gateway's own
+    // deadline. A young row with a past deadline must go.
+    const db = freshDb();
+    insertApproval(db, 'pa-expired', ago(DAY), ago(60 * 60 * 1000));
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({ pending_approvals: 1 });
+    expect(count(db, 'pending_approvals')).toBe(0);
+  });
+
+  it('honours an explicit expires_at that extends past the TTL', () => {
+    // The blanket TTL must not override a deadline someone set deliberately.
+    const db = freshDb();
+    insertApproval(db, 'pa-long', ago(PENDING_TTL_MS + 5 * DAY), ahead(DAY));
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_approvals')).toBe(1);
+  });
+
+  it('retains rows whose created_at cannot be parsed rather than guessing', () => {
+    const db = freshDb();
+    insertChannelApproval(db, 'not a date');
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+  });
+
+  it('treats a timezone-less created_at as UTC (no TZ-dependent early delete)', () => {
+    // Same trap parseSqliteUtc exists for: a bare SQLite timestamp exactly one
+    // hour inside the TTL must survive on hosts east or west of UTC.
+    const db = freshDb();
+    insertChannelApproval(db, new Date(NOW - PENDING_TTL_MS + 60 * 60 * 1000).toISOString().replace('Z', ''));
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+  });
+
+  it('clears the dedup key so a new approval card can be raised for the channel', () => {
+    // The real-world failure: pending_channel_approvals PK is the messaging
+    // group id, so an unresolved row suppresses every future card for that
+    // channel (channel-approval.ts hasInFlightChannelApproval). After GC the
+    // insert must succeed again.
+    const db = freshDb();
+    insertChannelApproval(db, ago(PENDING_TTL_MS + DAY));
+    expect(() => insertChannelApproval(db, ago(DAY))).toThrow(); // PK collision while stale row lives
+
+    sweepExpiredPending(db, NOW);
+
+    expect(() => insertChannelApproval(db, ago(DAY))).not.toThrow();
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+  });
+
+  it('unblocks the NO ACTION foreign keys that stall teardown', () => {
+    // pending_* rows reference agent_groups / sessions with no ON DELETE
+    // clause, so a forgotten row makes `ncl groups delete` fail. GC must
+    // remove that blocker.
+    const db = freshDb();
+    const stale = ago(PENDING_TTL_MS + DAY);
+    insertQuestion(db, 'pq-block', stale);
+    insertApproval(db, 'pa-block', stale, null);
+    expect(() => db.prepare("DELETE FROM sessions WHERE id = 'sess-1'").run()).toThrow();
+
+    sweepExpiredPending(db, NOW);
+
+    expect(() => db.prepare("DELETE FROM sessions WHERE id = 'sess-1'").run()).not.toThrow();
+  });
+
+  it('skips tables that do not exist in this install', () => {
+    // pending_sender_approvals / pending_channel_approvals arrive via later
+    // migrations; core code guards every read of them with hasTable.
+    const db = initTestDb();
+    runMigrations(db);
+    db.exec('DROP TABLE pending_channel_approvals');
+    expect(() => sweepExpiredPending(db, NOW)).not.toThrow();
   });
 });
 
