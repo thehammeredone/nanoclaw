@@ -62,7 +62,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `src/index.ts` | Entry point: init DB, migrations, channel adapters, delivery polls, sweep, shutdown |
 | `src/router.ts` | Inbound routing: messaging group → agent group → session → `inbound.db` → wake |
 | `src/delivery.ts` | Polls `outbound.db`, delivers via adapter, handles system actions (schedule, approvals, etc.) |
-| `src/host-sweep.ts` | 60s sweep: `processing_ack` sync, stale detection, due-message wake, recurrence |
+| `src/host-sweep.ts` | 60s sweep: `processing_ack` sync, stale detection, due-message wake, recurrence, `pending_*` GC (7-day TTL) |
 | `src/session-manager.ts` | Resolves sessions; opens `inbound.db` / `outbound.db`; manages heartbeat path |
 | `src/container-runner.ts` | Spawns per-agent-group Docker containers with session DB + outbox mounts, OneCLI `ensureAgent` |
 | `src/container-runtime.ts` | Runtime selection (Docker vs Apple containers), orphan cleanup |

@@ -25,12 +25,17 @@
  *        (claim_age > tolerance) AND (heartbeat_mtime <= status_changed)
  *        → kill + reset this message + tries++. Semantics: "container
  *        claimed a message and went quiet past tolerance since the claim."
+ *
+ * Also runs a once-per-tick GC over the central DB's four `pending_*` tables
+ * (approval / question cards that were never answered). See the
+ * `PENDING_TTL_MS` comment block below for why they need one.
  */
 import type Database from 'better-sqlite3';
 import fs from 'fs';
 
 import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getDb, hasTable } from './db/connection.js';
 import {
   countDueMessages,
   deleteOrphanProcessingClaims,
@@ -117,6 +122,213 @@ export function decideStuckAction(args: {
   return { action: 'ok' };
 }
 
+// ── Pending-approval GC ─────────────────────────────────────────────────────
+//
+// Approval cards are fully DB-backed and never expire on their own. The
+// button's platform payload is `ncq:<questionId>:<optionIndex>` and the
+// option list is re-read from the row's `options_json` on click
+// (src/db/sessions.ts:200 getAskQuestionRender), so a card stays clickable
+// for as long as the row exists — across host restarts, indefinitely. Three
+// concrete failures follow from that:
+//
+//   1. A card renders a roster (e.g. "connect this channel to <agent>") that
+//      goes stale. Selecting a deleted agent group is guarded
+//      (src/modules/permissions/index.ts:432) but selecting a *surviving* one
+//      replays a weeks-old stored message as if it just arrived.
+//   2. `pending_channel_approvals` (PK messaging_group_id) and
+//      `pending_sender_approvals` (UNIQUE messaging_group_id, sender_identity)
+//      double as in-flight dedup keys. A row that is never resolved silently
+//      suppresses every future approval card for that channel/sender.
+//   3. All four tables hold `NO ACTION` foreign keys (to agent_groups and/or
+//      sessions), so a forgotten row blocks agent-group and session deletion
+//      — see docs/runbooks/agent-group-teardown.md.
+//
+// TTL: 7 days. The window has to cover a human who is away for a long weekend
+// or a short holiday and comes back to an unanswered card, while staying well
+// inside the horizon over which the roster the card was rendered against can
+// change. The row that motivated this was 3 weeks old.
+//
+// No schema change: `pending_channel_approvals`, `pending_sender_approvals`
+// and `pending_questions` have no `expires_at` column, and adding one would
+// put the policy on every insert path instead of in one place here. Rows are
+// aged off `created_at` (NOT NULL on all four tables). Where an explicit
+// `expires_at` does exist — `pending_approvals`, populated from the OneCLI
+// gateway's own deadline (src/modules/approvals/onecli-approvals.ts:192) — it
+// can only bring expiry *forward*, never push it back: an earlier deadline
+// expires the row early, but a later (or skewed/buggy) deadline can never
+// hold a row past the blanket TTL. The TTL is a hard ceiling, not a default.
+export const PENDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Cap on how many row ids get logged per GC'd table. The full count is always
+// logged; the id list is for spot-checking, not an audit trail — an unbounded
+// list turns one big backlog into an unbounded log line.
+const ID_LOG_SAMPLE = 10;
+
+// created_at for a given `pending_*` row only ever gets a single warn the
+// first time it's found unparseable; every subsequent tick for the same row
+// demotes to debug. Otherwise a single corrupt row (which is retained, not
+// deleted — see below) warns once a minute forever. Scoped per DB connection
+// via WeakMap so it naturally resets on process restart (matching "warn
+// again if this is still a problem next time we start up") and never leaks
+// across independent DB instances (e.g. in tests).
+const warnedUnparseableCreatedAt = new WeakMap<Database.Database, Set<string>>();
+
+function warnUnparseableCreatedAtOnce(db: Database.Database, table: string, id: string, createdAt: string): void {
+  let seen = warnedUnparseableCreatedAt.get(db);
+  if (!seen) {
+    seen = new Set();
+    warnedUnparseableCreatedAt.set(db, seen);
+  }
+  const key = `${table}:${id}`;
+  const data = { table, id, createdAt };
+  if (seen.has(key)) {
+    log.debug('Pending GC: unparseable created_at, row retained (repeat)', data);
+    return;
+  }
+  seen.add(key);
+  log.warn('Pending GC: unparseable created_at, row retained', data);
+}
+
+interface PendingTableSpec {
+  table: string;
+  /** Primary-key column, used to delete and to name rows in the log. */
+  idColumn: string;
+  /** Whether the table carries an explicit per-row deadline. */
+  hasExpiresAt?: boolean;
+}
+
+// `pending_questions` is included deliberately. It is the odd one out — it
+// references sessions(id) and has no agent_group_id, so it is invisible to
+// every group-scoped sweep and is exactly the row that blocks a session
+// delete during teardown. Nothing references pending_questions in turn, so
+// aging it off is safe; the only effect is that a click on a long-dead
+// question card becomes an "Unclaimed response" warn instead of waking a
+// session that has moved on.
+const PENDING_TABLES: PendingTableSpec[] = [
+  { table: 'pending_approvals', idColumn: 'approval_id', hasExpiresAt: true },
+  { table: 'pending_questions', idColumn: 'question_id' },
+  { table: 'pending_sender_approvals', idColumn: 'id' },
+  { table: 'pending_channel_approvals', idColumn: 'messaging_group_id' },
+];
+
+/**
+ * Delete pending approval/question rows that have outlived their usefulness.
+ * Returns the per-table count of deleted rows (tables with nothing to delete
+ * are omitted) so callers and tests can assert on what happened.
+ */
+export function sweepExpiredPending(db: Database.Database, now: number = Date.now()): Record<string, number> {
+  const cutoff = now - PENDING_TTL_MS;
+  // Bind params for the SQL-side prefilter below. All four writers emit
+  // ISO-8601 (verified: src/delivery.ts:334, src/modules/approvals/onecli-
+  // approvals.ts:192, both permissions insert paths), so a lexicographic
+  // string comparison against another ISO-8601 string is equivalent to a
+  // chronological one for well-formed rows — no need to parse in SQL.
+  //
+  // But `created_at < ?` alone is a trap for garbage rows: lexicographic
+  // comparison only agrees with chronological comparison when both sides
+  // are well-formed ISO-8601. A garbage value that happens to sort *at or
+  // after* cutoffIso (e.g. 'not a date', 'zzzz' — anything not starting
+  // with a digit) would fail `created_at < ?` and never be selected at all,
+  // so it would never reach the JS parse/retain/warn path below: no warning
+  // logged, retention invisible, row sits forever holding its NO ACTION FK.
+  // Garbage that happens to sort *before* cutoffIso (e.g. '0000-00-00') was
+  // already fine — it passes the filter and reaches the JS path. The fix is
+  // an OR'd shape check: anything that isn't NULL, isn't '', and doesn't
+  // even look like an ISO-8601 date (leading `YYYY-`) is surfaced
+  // regardless of where it happens to sort. This is a cheap heuristic, not
+  // a full date validator — a value shaped like a date but nonsensical
+  // (e.g. '9999-99-99') can still slip past if it sorts at/after cutoffIso;
+  // that's an accepted gap, not a claim of full coverage.
+  const cutoffIso = new Date(cutoff).toISOString();
+  const notWellFormed = `created_at IS NULL OR created_at = '' OR created_at NOT GLOB '[0-9][0-9][0-9][0-9]-*'`;
+  const nowIso = new Date(now).toISOString();
+  const deleted: Record<string, number> = {};
+
+  for (const spec of PENDING_TABLES) {
+    // Isolated per table: migration 003 was edited in place after release
+    // (see module-approvals-title-options.ts) and only title/options_json
+    // ever got a catch-up ALTER — an install that never ran that ALTER for
+    // some other column (e.g. expires_at) would throw here. Without this
+    // try/catch, one bad table silently skips the other three every tick.
+    try {
+      if (!hasTable(db, spec.table)) continue;
+
+      const cols = spec.hasExpiresAt
+        ? `${spec.idColumn} AS id, created_at, expires_at`
+        : `${spec.idColumn} AS id, created_at, NULL AS expires_at`;
+      // Pushed-down prefilter: only rows that could plausibly be expired, or
+      // that need to be surfaced for the unparseable-created_at warn path,
+      // ever reach the JS logic below. A row whose expires_at is already
+      // past always qualifies (the "bring expiry forward" case); a
+      // well-formed created_at is gated on created_at < cutoff; anything
+      // that isn't a well-formed ISO-8601 timestamp (NULL, '', or no
+      // leading `YYYY-`) is also selected so it reaches the warn/retain
+      // path below instead of being silently hidden by the string
+      // comparison. Rows that still fail this filter are genuinely young,
+      // well-formed, and untouched — same as before, just without a query
+      // round-trip through JS for rows that plainly aren't candidates.
+      const where = spec.hasExpiresAt
+        ? `(created_at < ? OR ${notWellFormed}) OR (expires_at IS NOT NULL AND expires_at < ?)`
+        : `created_at < ? OR ${notWellFormed}`;
+      const params = spec.hasExpiresAt ? [cutoffIso, nowIso] : [cutoffIso];
+      const rows = db.prepare(`SELECT ${cols} FROM ${spec.table} WHERE ${where}`).all(...params) as Array<{
+        id: string;
+        created_at: string;
+        expires_at: string | null;
+      }>;
+
+      const expired: string[] = [];
+      for (const row of rows) {
+        const explicit = row.expires_at ? parseSqliteUtc(row.expires_at) : NaN;
+        if (!Number.isNaN(explicit) && explicit < now) {
+          // An explicit deadline in the past always expires the row — this is
+          // the "bring expiry forward" direction and is unconditional.
+          expired.push(row.id);
+          continue;
+        }
+
+        const createdAt = parseSqliteUtc(row.created_at);
+        // An unparseable created_at is left alone rather than guessed at; a
+        // wrong delete here is unrecoverable, a retained row is only clutter.
+        if (Number.isNaN(createdAt)) {
+          warnUnparseableCreatedAtOnce(db, spec.table, row.id, row.created_at);
+          continue;
+        }
+        // Ceiling: even a row with a future (or absent/unparseable) explicit
+        // expiry cannot outlive the blanket TTL measured off created_at. This
+        // is what stops a skewed or buggy gateway deadline from producing a
+        // permanently undeletable row.
+        if (createdAt < cutoff) expired.push(row.id);
+      }
+
+      if (expired.length === 0) continue;
+
+      const stmt = db.prepare(`DELETE FROM ${spec.table} WHERE ${spec.idColumn} = ?`);
+      // One transaction per table instead of N implicit ones — deletes for a
+      // table either all land or none do, and it's a single fsync instead of
+      // `expired.length` of them on the live central DB inside the sweep tick.
+      const deleteAll = db.transaction((ids: string[]) => {
+        for (const id of ids) stmt.run(id);
+      });
+      deleteAll(expired);
+
+      deleted[spec.table] = expired.length;
+      log.info('Expired stale pending rows', {
+        table: spec.table,
+        count: expired.length,
+        // Bounded sample — the count above is the thing to alert on; the ids
+        // are for spot-checking, not an unbounded audit trail.
+        ids: expired.slice(0, ID_LOG_SAMPLE),
+        ttlMs: PENDING_TTL_MS,
+      });
+    } catch (err) {
+      log.error('Pending GC: table sweep failed, other tables unaffected', { table: spec.table, err });
+    }
+  }
+
+  return deleted;
+}
+
 let running = false;
 
 export function startHostSweep(): void {
@@ -131,6 +343,15 @@ export function stopHostSweep(): void {
 
 async function sweep(): Promise<void> {
   if (!running) return;
+
+  // Central-DB GC runs once per tick, not per session — these tables live in
+  // data/v2.db. Isolated in its own try so a GC failure can't skip the
+  // per-session maintenance below.
+  try {
+    sweepExpiredPending(getDb());
+  } catch (err) {
+    log.error('Pending GC error', { err });
+  }
 
   try {
     const sessions = getActiveSessions();

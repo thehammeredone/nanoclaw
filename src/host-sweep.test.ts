@@ -4,16 +4,22 @@
  * don't have to mock the filesystem or the container runner.
  */
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { closeDb, initTestDb } from './db/connection.js';
+import { runMigrations } from './db/migrations/index.js';
 import { deleteOrphanProcessingClaims, getProcessingClaims } from './db/session-db.js';
 import {
   ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
+  PENDING_TTL_MS,
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
   parseSqliteUtc,
+  sweepExpiredPending,
 } from './host-sweep.js';
+import { log } from './log.js';
+import { updatePendingChannelApprovalCard } from './modules/permissions/db/pending-channel-approvals.js';
 import type { Session } from './types.js';
 
 const BASE = Date.parse('2026-04-20T12:00:00.000Z');
@@ -291,6 +297,394 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
     expect(getProcessingClaims(outDb)).toEqual([]);
     const row = inDb.prepare('SELECT tries FROM messages_in WHERE id = ?').get('m-2') as { tries: number };
     expect(row.tries).toBe(1); // not bumped, the skip path held
+  });
+});
+
+describe('sweepExpiredPending', () => {
+  // Real schema from the real migration chain against a temp DB — the FK
+  // graph (pending_* → agent_groups / messaging_groups / sessions) is the
+  // thing under test as much as the TTL arithmetic is.
+  const NOW = Date.parse('2026-08-22T12:00:00.000Z');
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+  const ahead = (ms: number) => new Date(NOW + ms).toISOString();
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function freshDb(): Database.Database {
+    const db = initTestDb();
+    runMigrations(db);
+    db.prepare("INSERT INTO agent_groups VALUES ('ag-1', 'Agent One', 'agent-one', NULL, ?)").run(ago(90 * DAY));
+    db.prepare(
+      "INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at) VALUES ('mg-1', 'matrix', '!room:example.org', 'Room', 0, 'strict', ?)",
+    ).run(ago(90 * DAY));
+    db.prepare(
+      "INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at) VALUES ('sess-1', 'ag-1', 'mg-1', NULL, NULL, 'active', 'stopped', ?, ?)",
+    ).run(ago(90 * DAY), ago(90 * DAY));
+    return db;
+  }
+
+  function insertChannelApproval(db: Database.Database, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO pending_channel_approvals
+         (messaging_group_id, agent_group_id, original_message, approver_user_id, created_at, title, options_json)
+       VALUES ('mg-1', 'ag-1', '{}', 'matrix:@hammer:example.org', ?, 'Card', '[]')`,
+    ).run(createdAt);
+  }
+
+  function insertSenderApproval(db: Database.Database, id: string, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO pending_sender_approvals
+         (id, messaging_group_id, agent_group_id, sender_identity, sender_name, original_message,
+          approver_user_id, created_at, title, options_json)
+       VALUES (?, 'mg-1', 'ag-1', ?, 'Someone', '{}', 'matrix:@hammer:example.org', ?, 'Card', '[]')`,
+    ).run(id, `matrix:@${id}:example.org`, createdAt);
+  }
+
+  function insertQuestion(db: Database.Database, id: string, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO pending_questions
+         (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, options_json, created_at)
+       VALUES (?, 'sess-1', 'mo-1', '!room:example.org', 'matrix', NULL, 'Q', '[]', ?)`,
+    ).run(id, createdAt);
+  }
+
+  function insertApproval(db: Database.Database, id: string, createdAt: string, expiresAt: string | null): void {
+    db.prepare(
+      `INSERT INTO pending_approvals
+         (approval_id, session_id, request_id, action, payload, created_at, agent_group_id,
+          channel_type, platform_id, platform_message_id, expires_at, status, title, options_json)
+       VALUES (?, 'sess-1', 'req-1', 'install_packages', '{}', ?, 'ag-1', 'matrix',
+               '!room:example.org', NULL, ?, 'pending', 'Card', '[]')`,
+    ).run(id, createdAt, expiresAt);
+  }
+
+  const count = (db: Database.Database, table: string): number =>
+    (db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
+
+  afterEach(() => {
+    closeDb();
+  });
+
+  it('deletes rows older than the TTL across all four pending_* tables', () => {
+    const db = freshDb();
+    const stale = ago(PENDING_TTL_MS + DAY);
+    insertChannelApproval(db, stale);
+    insertSenderApproval(db, 'psa-old', stale);
+    insertQuestion(db, 'pq-old', stale);
+    insertApproval(db, 'pa-old', stale, null);
+
+    const deleted = sweepExpiredPending(db, NOW);
+
+    expect(deleted).toEqual({
+      pending_approvals: 1,
+      pending_questions: 1,
+      pending_sender_approvals: 1,
+      pending_channel_approvals: 1,
+    });
+    expect(count(db, 'pending_channel_approvals')).toBe(0);
+    expect(count(db, 'pending_sender_approvals')).toBe(0);
+    expect(count(db, 'pending_questions')).toBe(0);
+    expect(count(db, 'pending_approvals')).toBe(0);
+  });
+
+  it('leaves rows inside the TTL alone', () => {
+    const db = freshDb();
+    const fresh = ago(PENDING_TTL_MS - DAY);
+    insertChannelApproval(db, fresh);
+    insertSenderApproval(db, 'psa-new', fresh);
+    insertQuestion(db, 'pq-new', fresh);
+    insertApproval(db, 'pa-new', fresh, null);
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+    expect(count(db, 'pending_sender_approvals')).toBe(1);
+    expect(count(db, 'pending_questions')).toBe(1);
+    expect(count(db, 'pending_approvals')).toBe(1);
+  });
+
+  it('is a no-op on empty tables (the current live state)', () => {
+    const db = freshDb();
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+  });
+
+  it('honours an explicit expires_at that fires before the TTL', () => {
+    // pending_approvals rows from the OneCLI gateway carry the gateway's own
+    // deadline. A young row with a past deadline must go.
+    const db = freshDb();
+    insertApproval(db, 'pa-expired', ago(DAY), ago(60 * 60 * 1000));
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({ pending_approvals: 1 });
+    expect(count(db, 'pending_approvals')).toBe(0);
+  });
+
+  it('retains a row with a future expires_at while it is still inside the TTL', () => {
+    // The common case: an explicit deadline hasn't arrived yet and the row
+    // is young. Nothing should happen to it.
+    const db = freshDb();
+    insertApproval(db, 'pa-young', ago(DAY), ahead(DAY));
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_approvals')).toBe(1);
+  });
+
+  it('a future expires_at cannot push a row past the TTL ceiling', () => {
+    // Explicit expiry can only bring expiry forward, never hold a row past
+    // the blanket TTL — a skewed or buggy gateway deadline must not produce
+    // a permanently undeletable row. createdAt is well past the TTL even
+    // though expires_at is still in the future.
+    const db = freshDb();
+    insertApproval(db, 'pa-long', ago(PENDING_TTL_MS + 5 * DAY), ahead(DAY));
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({ pending_approvals: 1 });
+    expect(count(db, 'pending_approvals')).toBe(0);
+  });
+
+  it('retains rows whose created_at cannot be parsed rather than guessing, and warns once', () => {
+    const db = freshDb();
+    insertChannelApproval(db, 'not a date');
+
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+    // Garbage created_at must be surfaced and warned about, not silently
+    // dropped by the SQL prefilter — see the regression test below.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    warnSpy.mockRestore();
+  });
+
+  it('surfaces and warns on garbage created_at that sorts lexicographically AFTER the cutoff (regression)', () => {
+    // 'zzzz' sorts *after* cutoffIso ('2026-08-15T12:00:00.000Z' starts with
+    // '2'; 'zzzz' starts with 'z'). A naive `created_at < ?` SQL prefilter
+    // never selects this row at all, so it never reaches the JS parse/
+    // retain/warn path — the warning never fires and the row is invisible
+    // to the GC forever, still holding its NO ACTION foreign key. Same
+    // contract as '0000-00-00' (which happens to sort *before* the cutoff),
+    // just approached from the other side of the string-comparison trap.
+    const db = freshDb();
+    insertChannelApproval(db, 'zzzz');
+
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+
+    warnSpy.mockRestore();
+  });
+
+  it('treats a timezone-less created_at as UTC (no TZ-dependent early delete)', () => {
+    // Same trap parseSqliteUtc exists for: a bare SQLite timestamp exactly one
+    // hour inside the TTL must survive on hosts east or west of UTC.
+    const db = freshDb();
+    insertChannelApproval(db, new Date(NOW - PENDING_TTL_MS + 60 * 60 * 1000).toISOString().replace('Z', ''));
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+  });
+
+  it('clears the dedup key so a new approval card can be raised for the channel', () => {
+    // The real-world failure: pending_channel_approvals PK is the messaging
+    // group id, so an unresolved row suppresses every future card for that
+    // channel (channel-approval.ts hasInFlightChannelApproval). After GC the
+    // insert must succeed again.
+    const db = freshDb();
+    insertChannelApproval(db, ago(PENDING_TTL_MS + DAY));
+    expect(() => insertChannelApproval(db, ago(DAY))).toThrow(); // PK collision while stale row lives
+
+    sweepExpiredPending(db, NOW);
+
+    expect(() => insertChannelApproval(db, ago(DAY))).not.toThrow();
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+  });
+
+  it('unblocks the NO ACTION foreign keys that stall teardown', () => {
+    // pending_* rows reference agent_groups / sessions with no ON DELETE
+    // clause, so a forgotten row makes `ncl groups delete` fail. GC must
+    // remove that blocker.
+    const db = freshDb();
+    const stale = ago(PENDING_TTL_MS + DAY);
+    insertQuestion(db, 'pq-block', stale);
+    insertApproval(db, 'pa-block', stale, null);
+    expect(() => db.prepare("DELETE FROM sessions WHERE id = 'sess-1'").run()).toThrow();
+
+    sweepExpiredPending(db, NOW);
+
+    expect(() => db.prepare("DELETE FROM sessions WHERE id = 'sess-1'").run()).not.toThrow();
+  });
+
+  it('skips tables that do not exist in this install', () => {
+    // pending_sender_approvals / pending_channel_approvals arrive via later
+    // migrations; core code guards every read of them with hasTable.
+    const db = initTestDb();
+    runMigrations(db);
+    db.exec('DROP TABLE pending_channel_approvals');
+    expect(() => sweepExpiredPending(db, NOW)).not.toThrow();
+  });
+
+  it('isolates a single table failure so the other three tables still get swept', () => {
+    // Repro of the exact production risk: migration 003 was edited in place
+    // after release (module-approvals-title-options.ts is the catch-up for
+    // title/options_json) — an install that never got a catch-up ALTER for
+    // some other column would throw "no such column" on this table's SELECT.
+    // Simulate that by recreating pending_approvals without expires_at.
+    const db = freshDb();
+    db.exec(`
+      DROP TABLE pending_approvals;
+      CREATE TABLE pending_approvals (
+        approval_id         TEXT PRIMARY KEY,
+        session_id          TEXT REFERENCES sessions(id),
+        request_id          TEXT NOT NULL,
+        action               TEXT NOT NULL,
+        payload              TEXT NOT NULL,
+        created_at           TEXT NOT NULL,
+        agent_group_id       TEXT REFERENCES agent_groups(id),
+        channel_type         TEXT,
+        platform_id          TEXT,
+        platform_message_id  TEXT,
+        status               TEXT NOT NULL DEFAULT 'pending',
+        title                TEXT NOT NULL DEFAULT '',
+        options_json         TEXT NOT NULL DEFAULT '[]'
+      );
+    `);
+    const stale = ago(PENDING_TTL_MS + DAY);
+    insertChannelApproval(db, stale);
+    insertSenderApproval(db, 'psa-old', stale);
+    insertQuestion(db, 'pq-old', stale);
+
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const deleted = sweepExpiredPending(db, NOW);
+
+    expect(deleted).toEqual({
+      pending_questions: 1,
+      pending_sender_approvals: 1,
+      pending_channel_approvals: 1,
+    });
+    expect(count(db, 'pending_channel_approvals')).toBe(0);
+    expect(count(db, 'pending_sender_approvals')).toBe(0);
+    expect(count(db, 'pending_questions')).toBe(0);
+    expect(errSpy).toHaveBeenCalledWith(
+      'Pending GC: table sweep failed, other tables unaffected',
+      expect.objectContaining({ table: 'pending_approvals' }),
+    );
+    errSpy.mockRestore();
+  });
+
+  it('warns once for an unparseable created_at and demotes to debug on subsequent ticks', () => {
+    // "0000-00-00" is shaped like an ISO date (leading `YYYY-`) and sorts
+    // lexicographically before any real cutoff string (starts with '0'), so
+    // it reaches the SQL prefilter's `created_at < ?` branch on its own —
+    // no need for the not-well-formed OR clause here. It still fails
+    // Date.parse (renders NaN), so it reaches the JS parse/retain path the
+    // same as any other corrupt row. See the 'zzzz'/'not a date' tests
+    // above for garbage that only the not-well-formed OR clause surfaces.
+    const db = freshDb();
+    insertChannelApproval(db, '0000-00-00');
+
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const debugSpy = vi.spyOn(log, 'debug').mockImplementation(() => {});
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(debugSpy).not.toHaveBeenCalled();
+
+    // Second tick, same row, same db instance: no repeat warn, demoted to debug.
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(debugSpy).toHaveBeenCalledTimes(1);
+
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
+    warnSpy.mockRestore();
+    debugSpy.mockRestore();
+  });
+
+  it('classifies every created_at shape correctly: surfaced-and-warned vs genuinely-old-and-deleted vs retained silently', () => {
+    // The full contract, enumerated. NULL is not tested at the DB level —
+    // created_at is NOT NULL on all four tables (schema-enforced), so a
+    // real NULL row can never exist; the SQL prefilter's `IS NULL` arm is
+    // defensive only.
+    const db = freshDb();
+
+    // Surfaced (selected by the SQL prefilter) and warned-once, then
+    // retained — genuinely unparseable, in either sort direction relative
+    // to cutoffIso, plus the empty-string and epoch-integer shapes.
+    insertSenderApproval(db, 'garbage-empty', '');
+    insertSenderApproval(db, 'garbage-notadate', 'not a date');
+    insertSenderApproval(db, 'garbage-zzzz', 'zzzz');
+    insertSenderApproval(db, 'garbage-epoch', '1700000000000'); // epoch-as-text, no leading YYYY-
+
+    // Genuinely old and well-formed: deleted outright, no warn.
+    insertSenderApproval(db, 'old-bare-date', '2020-01-01'); // bare date, well past TTL
+
+    // Young and well-formed: untouched, no warn, not even selected by SQL.
+    insertSenderApproval(db, 'fresh', ago(DAY));
+
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    const deleted = sweepExpiredPending(db, NOW);
+
+    expect(deleted).toEqual({ pending_sender_approvals: 1 }); // only 'old-bare-date'
+    expect(warnSpy).toHaveBeenCalledTimes(4); // the four garbage rows, once each
+
+    const remainingIds = (
+      db.prepare('SELECT id FROM pending_sender_approvals ORDER BY id').all() as Array<{ id: string }>
+    ).map((r) => r.id);
+    expect(remainingIds).toEqual(['fresh', 'garbage-empty', 'garbage-epoch', 'garbage-notadate', 'garbage-zzzz']);
+
+    warnSpy.mockRestore();
+  });
+
+  it('deletes multiple expired rows in one table together (transaction-wrapped, not N implicit commits)', () => {
+    // Doesn't fabricate a mid-batch failure (hard to arrange honestly against
+    // a real DB here) — asserts the observable contract instead: several
+    // expired rows in the same table all land in a single sweep call, which
+    // is what db.transaction(...) buys over N bare .run() calls.
+    const db = freshDb();
+    const stale = ago(PENDING_TTL_MS + DAY);
+    insertSenderApproval(db, 'psa-a', stale);
+    insertSenderApproval(db, 'psa-b', stale);
+    insertSenderApproval(db, 'psa-c', stale);
+
+    const deleted = sweepExpiredPending(db, NOW);
+
+    expect(deleted).toEqual({ pending_sender_approvals: 3 });
+    expect(count(db, 'pending_sender_approvals')).toBe(0);
+  });
+
+  it('caps the number of ids logged while still reporting the full count', () => {
+    const db = freshDb();
+    const stale = ago(PENDING_TTL_MS + DAY);
+    const total = 15;
+    for (let i = 0; i < total; i++) {
+      insertSenderApproval(db, `psa-${i}`, stale);
+    }
+
+    const infoSpy = vi.spyOn(log, 'info').mockImplementation(() => {});
+    const deleted = sweepExpiredPending(db, NOW);
+
+    expect(deleted).toEqual({ pending_sender_approvals: total });
+    const call = infoSpy.mock.calls.find(
+      (c) => (c[1] as Record<string, unknown>)?.table === 'pending_sender_approvals',
+    );
+    expect(call).toBeDefined();
+    const data = call![1] as { count: number; ids: string[] };
+    expect(data.count).toBe(total);
+    expect(data.ids.length).toBeLessThan(total);
+    infoSpy.mockRestore();
+  });
+
+  it('refreshes created_at on a mid-flow card update, so an in-progress approval outlives the TTL', () => {
+    // The real-world hole: a "choose existing agent" follow-up
+    // (updatePendingChannelApprovalCard) on a card whose original created_at
+    // is already past the TTL must not be GC'd out from under the user's
+    // in-flight reply.
+    const db = freshDb();
+    insertChannelApproval(db, ago(PENDING_TTL_MS + DAY));
+
+    updatePendingChannelApprovalCard('mg-1', 'Choose an agent', '[]', new Date(NOW).toISOString());
+
+    expect(sweepExpiredPending(db, NOW)).toEqual({});
+    expect(count(db, 'pending_channel_approvals')).toBe(1);
   });
 });
 
