@@ -280,9 +280,11 @@ Ran the reconcile snippet above and cross-checked by hand against `select id, na
 | OneCLI identifier | name | agent_groups id | agent_groups name | secretMode |
 |---|---|---|---|---|
 | `default` | Default Agent | — (built-in, no agent group) | — | all |
-| `ag-740a6fb3-5aff-42e8-b5dd-0a8a57d6b4a5` | Radar | `740a6fb3-5aff-42e8-b5dd-0a8a57d6b4a5` | Radar | all |
-| `ag-1782273071167-th1q6f` | Aurora | `ag-1782273071167-th1q6f` | Aurora | all |
-| `ag-1779381936325-6ki38t` | Mjollnir | `ag-1779381936325-6ki38t` | Mjollnir | all |
+| `ag-740a6fb3-5aff-42e8-b5dd-0a8a57d6b4a5` | Radar | `740a6fb3-5aff-42e8-b5dd-0a8a57d6b4a5` | Radar | selective |
+| `ag-1782273071167-th1q6f` | Aurora | `ag-1782273071167-th1q6f` | Aurora | selective |
+| `ag-1779381936325-6ki38t` | Mjollnir | `ag-1779381936325-6ki38t` | Mjollnir | selective |
+
+The three group agents were `all` when this audit began and were **narrowed to `selective` on 2026-08-22** — see below.
 
 `local-qwen3.6` (`103c34dd-8610-4bd6-9fa0-b9b98f79941d`) has no vault agent — it has never spawned a container, so that is expected, not an orphan.
 
@@ -290,7 +292,13 @@ The three orphans named in TASK-16's original description (Memory, Coder, Termin
 
 **Secret assignment audit.** `onecli secrets list` shows exactly one vault secret: `6387482f-2fac-4ce4-a1bf-eb34633576b3` ("Anthropic", type `anthropic`, host pattern `api.anthropic.com`). `onecli agents secrets --id <id>` for each of Radar, Aurora, and Mjollnir returns that one secret id explicitly assigned; Default Agent's assignment list is empty. No assignment references a non-existent agent — AC#2 holds with nothing to clean up.
 
-**secretMode: all, given one vault secret.** Every non-default agent has `secretMode: "all"` — any vault secret whose host pattern matches gets injected into every request from that agent, no per-agent opt-in. With exactly one secret in the vault, `all` and "selective, assigned to that one secret" are **functionally identical today** — there's nothing else it could inject. That equivalence breaks the moment a second secret is added: a new credential with a matching host pattern would auto-flow into Radar, Aurora, and Mjollnir with no additional step, whether or not that agent's task needs it. Whether `all` is still the intended posture once the vault holds more than one secret is a decision reserved for the human (see the CLAUDE.md gotcha "Gotcha: auto-created agents start in `selective` secret mode" for the flip side — these agents were presumably moved off `selective` deliberately to unblock 401s, and that choice hasn't been revisited since).
+**secretMode narrowed to `selective` (2026-08-22).** Every non-default agent was `secretMode: "all"` — any vault secret whose host pattern matches gets injected into every request from that agent, no per-agent opt-in. With exactly one secret in the vault, `all` and "selective, assigned to that one secret" were **functionally identical**: there was nothing else `all` could inject. That equivalence would have broken the moment a second secret was added — a new credential with a matching host pattern would auto-flow into Radar, Aurora, and Mjollnir with no additional step, whether or not that agent's task needed it.
+
+The owner's decision was to narrow rather than confirm `all`. Radar, Aurora, and Mjollnir were set to `selective` via `onecli agents set-secret-mode --id <agent-id> --mode selective`; each already held the Anthropic secret as an explicit assignment, so the change was verified to be a no-op for current behaviour (assignment lists unchanged, still `["6387482f-…"]`). A second vault secret now requires a deliberate `onecli agents set-secrets` per agent that should receive it.
+
+`default` (the built-in agent) was **left at `all`** — it is not tied to an agent group, holds no explicit assignments, and is not on the container injection path for any group, so narrowing it had no security benefit and some risk of breaking OneCLI's own defaults.
+
+Note the interaction with the CLAUDE.md gotcha "Gotcha: auto-created agents start in `selective` secret mode": a **newly** auto-created agent group starts at `selective` with *no* secrets assigned, which is the 401 failure mode described there. The fix for that is `onecli agents set-secrets --id <agent-id> --secret-ids <id>` (assign what it needs), not `--mode all`.
 
 ### Vault-agent orphans: where the guarantee now lives
 
