@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 03:20'
-updated_date: '2026-08-22 20:46'
+updated_date: '2026-08-22 20:54'
 labels:
   - approvals
 dependencies: []
@@ -129,4 +129,6 @@ Fixed 5 findings from code review on this branch:
 - Mutation-checked by reverting src/host-sweep.ts and src/modules/permissions/db/pending-channel-approvals.ts to their pre-fix (HEAD) versions and re-running the new tests: all 5 behavioral tests (isolation, ceiling, warn-once, id-cap, mid-flow-refresh) failed as expected against the old code; restored the fix and all 35 passed again.
 - Full suite: `pnpm test` → 418 passed, 34 files. `pnpm exec tsc --noEmit` → clean, exit 0.
 - CLAUDE.md and docs/setup-wiring.md both only state the TTL generically ("pending_* GC (7-day TTL)") with no directional expires_at claim — no edit needed there. Grepped for other statements of the both-directions claim; only the host-sweep.ts comment block stated it, and that's now corrected.
+
+Round-2 fix (commit bef42fa7): the round-1 SQL prefilter `created_at < ?` is a lexicographic string comparison, so garbage that sorts at/after cutoffIso ('not a date', 'zzzz') was never SELECTed at all -- never warned, never surfaced, retained invisibly forever, still holding its NO ACTION FK. Fixed by OR'ing in a shape check: created_at IS NULL OR created_at = '' OR created_at NOT GLOB '[0-9][0-9][0-9][0-9]-*' (src/host-sweep.ts, sweepExpiredPending). Contract verified across shapes: NULL -- schema-enforced NOT NULL on all 4 tables, unreachable at DB level, defensive-only in code; '' -- surfaced+warned+retained; '0000-00-00' -- surfaced+warned+retained (was already reachable, sorts before cutoff); 'not a date' -- surfaced+warned+retained (previously invisible, now fixed); 'zzzz' -- surfaced+warned+retained (previously invisible, now fixed -- this was the regression); '2020-01-01' bare date well past TTL -- genuinely-old, deleted, no warn; epoch-integer-as-text e.g. '1700000000000' -- surfaced+warned+retained (no leading YYYY-, fails GLOB). Known accepted gap noted in code comment: a value shaped like a date but nonsensical (e.g. '9999-99-99') can still slip past silently if it sorts at/after cutoffIso -- heuristic shape check, not a full date validator. Wrote failing regression test first (zzzz case), confirmed it failed against pre-fix HEAD (AssertionError: expected warn called 1 times, got 0), then fixed. Corrected two masking tests: '0000-00-00' test comment no longer claims the filter is expected to hide garbage; 'not a date' test now asserts warn called once. Added a comprehensive shape-classification test enumerating all shapes above. grepped docs/ and CLAUDE.md for other statements of this created_at/parse semantics -- none found outside src/host-sweep.ts itself and its own test file; docs/db-central.md (referenced by this task) only documents schema/FK shape, no GC semantics to reconcile. Verification: pnpm exec vitest run src/host-sweep.test.ts -> 37/37 passed; pnpm test -> 420/420 passed across 34 files; pnpm exec tsc --noEmit -> clean, exit 0.
 <!-- SECTION:NOTES:END -->
