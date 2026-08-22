@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 03:19'
-updated_date: '2026-08-22 17:57'
+updated_date: '2026-08-22 18:10'
 labels:
   - security
 dependencies: []
@@ -77,4 +77,57 @@ secretMode audit (AC#3, decision reserved for the human/orchestrator, not change
 Files changed: docs/state-discovery.md only. No code change — none was needed; AC#1 and AC#2 already held. Commit: 0977363f on branch task-16-delete-orphaned-onecli-vault-agents-and-audit-secret-assignments.
 
 AC#3 resolved by the owner during orchestrator session be31f486 (2026-08-22): narrow rather than confirm. Radar (e8feaf79), Aurora (7d42c23f) and Mjollnir (956d711e) were set to secretMode=selective via 'onecli agents set-secret-mode --id <agent-id> --mode selective'; all three returned {"mode":"selective","status":"updated"}. Verified after the change: 'onecli agents list' reports selective for all three (default remains all), and 'onecli agents secrets --id <id>' still returns exactly ['6387482f-2fac-4ce4-a1bf-eb34633576b3'] for each — so the narrowing was a verified no-op for current behaviour. The built-in 'default' agent was deliberately left at 'all': it maps to no agent group, holds no explicit assignments, and is not on any group's container injection path. docs/state-discovery.md was swept for the stale 'all' claim in both places it appeared (the audit table's secretMode column and the prose paragraph).
+
+Review-findings pass (post-implementation). Fixed all 6 findings from code-review:
+
+1. [Important] Reconcile snippet had no UNKNOWN state — rewrote docs/state-discovery.md's
+   reconcile snippet (now ~line 147-224) to three exit codes: OK=0, ORPHANS FOUND=1, UNKNOWN=2.
+   UNKNOWN triggers on: onecli non-zero exit, unparseable JSON, wrong shape (discovered during
+   testing that `--fields=...` returns a bare JSON array, NOT the unfiltered call's {"data":[...]}
+   envelope — the shape check was corrected to match what the `--fields` invocation actually
+   returns, not blindly copied from findOnecliAgent's no-fields assumption), or a failing/empty
+   scripts/q.ts query. Added a catch-all `except Exception` -> UNKNOWN as defense in depth.
+   Mirrors src/teardown/agent-group-teardown.ts:611-666 unknown semantics.
+
+2. [Important] Bare `onecli agents list` credential leak — fixed in docs/state-discovery.md
+   (Docker+OneCLI state block), CLAUDE.md (Gotcha bash block), .claude/skills/add-gmail-tool/SKILL.md,
+   .claude/skills/add-gcal-tool/SKILL.md — all now use --fields=identifier,name,secretMode[,isDefault]
+   with an accessToken warning comment. Left untouched: docs/runbooks/agent-group-teardown.md:237,251
+   (prose describing behavior, not paste-and-share) and init-onecli/add-opencode/add-vercel SKILL.md
+   (piped straight into jq extracting only .id — no accessToken ever printed).
+
+3. [Important] CLAUDE.md:170 (now 182) and docs/v1-to-v2-changes.md:83 prescribed --mode all as
+   THE fix — demoted to "blunt fallback", made set-secrets the primary remedy, cross-referenced
+   the docs/state-discovery.md 2026-08-22 narrowing decision in both places.
+
+4. [Minor] Matcher stricter than source — now accepts both the ag--prefixed AND raw unprefixed
+   id per group (mirrors agent-group-teardown.ts:654-655), via acceptable_identifiers() returning
+   a 2-element set instead of a single expected_identifier().
+
+5. [Minor] "default" detected by isDefault flag now (requested via --fields=...,isDefault), not
+   the literal string "default" — mirrors agent-group-teardown.ts:657/661.
+
+6. [Minor] Line ~299 non-sequitur fixed — dropped "holds no explicit assignments" (meaningless
+   under secretMode=all), kept only the verified injection-path argument: container-runner.ts:140
+   always computes a non-empty agentIdentifier, :141 is the only buildContainerArgs call site,
+   :431 the only applyContainerConfig call — confirmed via `grep -n "buildContainerArgs\|applyContainerConfig" src/container-runner.ts`
+   (single call site each) — so the `if (agentIdentifier)` guard at :428 is unreachable and no
+   container ever runs as `default`.
+
+Verification — ran the rewritten reconcile snippet exactly as it appears in the doc, four times:
+  - Healthy (real onecli + real q.ts): "OK: 0 orphans. 4 onecli agents (incl. default) reconcile
+    against 4 agent_groups rows." + "NOTE: no vault agent yet for ... local-qwen3.6" -> exit 0
+  - Stub onecli exits 1: "UNKNOWN: onecli agents list exited 1 (missing binary, or gateway down?)" -> exit 2
+  - Stub onecli exits 0 with garbage text: "UNKNOWN: could not parse onecli agents list output: ..." -> exit 2
+  - Stub onecli exits 0 with valid JSON in the wrong shape (dict instead of array): "UNKNOWN:
+    unexpected onecli agents list shape: expected a JSON array (with --fields)" -> exit 2
+  - Also spot-checked ORPHANS FOUND path with a fabricated extra agent -> exit 1, correct.
+  No destructive onecli calls made; no credential values written anywhere.
+
+pnpm test: 402 passed (34 files). pnpm exec tsc --noEmit: clean.
+
+Commits: 3ce7dd25 (reconcile-script rewrite + credential-leak fixes + non-sequitur fix),
+6bf... (see git log) for CLAUDE.md/v1-to-v2-changes.md --mode all demotion.
+
+Correction: the fixes above landed in a single commit, not two — 13980ea3 (fix(task-16): reconcile snippet unknown-state, credential-leak, and --mode-all review findings). Ignore the placeholder SHAs in the previous note.
 <!-- SECTION:NOTES:END -->
