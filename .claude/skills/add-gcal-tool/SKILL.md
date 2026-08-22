@@ -81,7 +81,7 @@ cat ~/.config/nanoclaw/mount-allowlist.json
 For each target agent group, confirm OneCLI will inject the Google Calendar token:
 
 ```bash
-onecli agents list
+onecli agents list --fields=identifier,name,secretMode   # never plain `onecli agents list` — it includes accessToken
 ```
 
 `secretMode: all` is sufficient. If `selective`, explicitly assign the Calendar secret.

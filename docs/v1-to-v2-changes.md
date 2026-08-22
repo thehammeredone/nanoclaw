@@ -80,7 +80,7 @@ Tasks can exist before a session is awake — the host sweep creates/wakes the c
 
 **v2:** OneCLI Agent Vault. A separate local service at `http://127.0.0.1:10254` holds secrets. Agents are *scoped* to specific secrets and the vault injects them into approved API requests as they leave the container. The container never sees the raw secret value.
 
-Gotcha: auto-created agents default to `selective` secret mode — no secrets attached, even if matching secrets exist in the vault. See the "auto-created agents start in selective secret mode" section of the root CLAUDE.md for the fix (`onecli agents set-secret-mode --mode all`).
+Gotcha: auto-created agents default to `selective` secret mode — no secrets attached, even if matching secrets exist in the vault. See the "auto-created agents start in selective secret mode" section of the root CLAUDE.md for the fix: assign the specific secrets the agent needs (`onecli agents set-secrets --id <agent-id> --secret-ids <id1>,<id2>`). `--mode all` is a blunt fallback, not the primary fix — it opts the agent into every current and future vault secret with a matching host pattern. This install deliberately narrowed its group agents off `all` to `selective` (see docs/state-discovery.md's "OneCLI vault agent audit", 2026-08-22).
 
 **What the automated migration does:** copies every v1 `.env` key verbatim into v2 `.env`, never overwriting existing v2 keys. The OneCLI vault migration is a separate step owned by the `/init-onecli` skill, which knows how to pull from `.env`.
 

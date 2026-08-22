@@ -148,32 +148,80 @@ pnpm exec tsx scripts/q.ts data/v2.db \
 # Encodes the exact identifier rule from src/container-runner.ts:136-140:
 #   identifier = agentGroup.id            if agentGroup.id starts with a letter
 #              = "ag-" + agentGroup.id    otherwise (OneCLI requires identifiers to start with a letter)
-# "default" is the built-in agent (no agent group, not an orphan by design).
+# The match also accepts the raw unprefixed agent_groups id, not only the `ag-`-prefixed form —
+# mirrors src/teardown/agent-group-teardown.ts:654-655 (a legacy unprefixed agent is a match, not
+# an orphan). "default" is the built-in agent (no agent group, not an orphan by design) — matched
+# by the `isDefault` flag onecli reports, not by the string "default"
+# (src/teardown/agent-group-teardown.ts:657: an agent merely *named* "default" is not the built-in).
 # An agent_groups row with no matching identifier is normal too — it just never spawned a container yet.
-onecli_json=$(onecli agents list --fields=identifier,name,secretMode)   # never use plain `onecli agents list` in a paste — it includes accessToken
-groups_tsv=$(pnpm exec tsx scripts/q.ts data/v2.db "select id, name from agent_groups")
+#
+# Three outcomes, three exit codes — never conflate "no orphans" with "couldn't check":
+#   OK (0)            — both inputs parsed to a trustworthy shape, reconciled, zero orphans.
+#   ORPHANS FOUND (1) — reconciled, at least one onecli agent has no matching agent_groups row.
+#   UNKNOWN (2)       — onecli missing/non-zero exit, unparseable output, output that doesn't
+#                       parse to the expected shape, or a failing/empty scripts/q.ts query.
+#                       Mirrors findOnecliAgent's absent-vs-unknown split
+#                       (src/teardown/agent-group-teardown.ts:611-666): "no orphans" and
+#                       "couldn't tell" must never be printed (or exit-coded) the same way.
+#                       Note the `--fields` projection below returns a bare JSON array, not the
+#                       unfiltered call's `{"data": [...]}` envelope — the shape check matches that.
+onecli_json=$(onecli agents list --fields=identifier,name,secretMode,isDefault 2>/dev/null)   # never plain `onecli agents list` in a paste — it includes accessToken
+onecli_rc=$?
+groups_tsv=$(pnpm exec tsx scripts/q.ts data/v2.db "select id, name from agent_groups" 2>/dev/null)
+groups_rc=$?
 
-python3 - "$onecli_json" "$groups_tsv" <<'PY'
+python3 - "$onecli_rc" "$onecli_json" "$groups_rc" "$groups_tsv" <<'PY'
 import json, re, sys
-onecli = json.loads(sys.argv[1])
-groups = [line.split("|", 1) for line in sys.argv[2].strip().splitlines() if line.strip()]
 
-def expected_identifier(gid):
-    return gid if re.match(r'^[a-zA-Z]', gid) else f"ag-{gid}"
+onecli_rc, onecli_raw, groups_rc, groups_tsv = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), sys.argv[4]
 
-expected = {expected_identifier(gid): (gid, gname) for gid, gname in groups}
-orphans = [a for a in onecli if a["identifier"] != "default" and a["identifier"] not in expected]
+def unknown(msg):
+    print(f"UNKNOWN: {msg}")
+    sys.exit(2)
 
-if orphans:
-    print(f"ORPHANS FOUND: {len(orphans)}")
-    for o in orphans:
-        print(f"  identifier={o['identifier']} name={o['name']} secretMode={o['secretMode']}")
-    sys.exit(1)
+if onecli_rc != 0:
+    unknown(f"onecli agents list exited {onecli_rc} (missing binary, or gateway down?)")
 
-print(f"OK: 0 orphans. {len(onecli)} onecli agents (incl. default) reconcile against {len(groups)} agent_groups rows.")
-unspawned = [gname for gid, gname in groups if expected_identifier(gid) not in {a['identifier'] for a in onecli}]
-if unspawned:
-    print(f"NOTE: no vault agent yet for (never spawned a container — not an orphan): {', '.join(unspawned)}")
+try:
+    parsed = json.loads(onecli_raw)
+except json.JSONDecodeError as err:
+    unknown(f"could not parse onecli agents list output: {err}")
+
+if not isinstance(parsed, list):
+    unknown('unexpected onecli agents list shape: expected a JSON array (with --fields)')
+
+if groups_rc != 0 or not groups_tsv.strip():
+    unknown("scripts/q.ts agent_groups query failed or returned no rows")
+groups = [line.split("|", 1) for line in groups_tsv.strip().splitlines() if line.strip()]
+
+def acceptable_identifiers(gid):
+    # Mirrors findOnecliAgent's match rule (agent-group-teardown.ts:654-655): accepts
+    # the `ag-`-prefixed form AND the raw unprefixed id (legacy agents may use either).
+    prefixed = gid if re.match(r'^[a-zA-Z]', gid) else f"ag-{gid}"
+    return {prefixed, gid}
+
+try:
+    expected = {}
+    for gid, gname in groups:
+        for ident in acceptable_identifiers(gid):
+            expected[ident] = (gid, gname)
+
+    orphans = [a for a in parsed if not a.get("isDefault") and a["identifier"] not in expected]
+
+    if orphans:
+        print(f"ORPHANS FOUND: {len(orphans)}")
+        for o in orphans:
+            print(f"  identifier={o['identifier']} name={o['name']} secretMode={o.get('secretMode')}")
+        sys.exit(1)
+
+    print(f"OK: 0 orphans. {len(parsed)} onecli agents (incl. default) reconcile against {len(groups)} agent_groups rows.")
+    matched = {a["identifier"] for a in parsed}
+    unspawned = sorted({gname for gid, gname in groups if acceptable_identifiers(gid).isdisjoint(matched)})
+    if unspawned:
+        print(f"NOTE: no vault agent yet for (never spawned a container — not an orphan): {', '.join(unspawned)}")
+    sys.exit(0)
+except Exception as err:
+    unknown(f"unexpected error reconciling: {err}")
 PY
 ```
 
@@ -182,7 +230,7 @@ PY
 ```bash
 docker images --format '{{.Repository}}:{{.Tag}}' | grep nanoclaw
 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}'
-onecli agents list
+onecli agents list --fields=identifier,name,secretMode   # never plain `onecli agents list` in a paste — it includes accessToken
 ```
 
 ---
@@ -296,7 +344,7 @@ The three orphans named in TASK-16's original description (Memory, Coder, Termin
 
 The owner's decision was to narrow rather than confirm `all`. Radar, Aurora, and Mjollnir were set to `selective` via `onecli agents set-secret-mode --id <agent-id> --mode selective`; each already held the Anthropic secret as an explicit assignment, so the change was verified to be a no-op for current behaviour (assignment lists unchanged, still `["6387482f-…"]`). A second vault secret now requires a deliberate `onecli agents set-secrets` per agent that should receive it.
 
-`default` (the built-in agent) was **left at `all`** — it is not tied to an agent group, holds no explicit assignments, and is not on the container injection path for any group, so narrowing it had no security benefit and some risk of breaking OneCLI's own defaults.
+`default` (the built-in agent) was **left at `all`** — it is not tied to an agent group and no container ever runs under it: `container-runner.ts:140` always computes a non-empty `agentIdentifier` (the agent group id, `ag-`-prefixed when it starts with a digit), `:141` is the only `buildContainerArgs` call site and `:431` the only `applyContainerConfig` call, both threading that identifier through — so the `if (agentIdentifier)` guard at `:428` is unreachable and `default` is never the identity a container is spawned or credentialed as. Narrowing it had no security benefit and some risk of breaking OneCLI's own defaults.
 
 Note the interaction with the CLAUDE.md gotcha "Gotcha: auto-created agents start in `selective` secret mode": a **newly** auto-created agent group starts at `selective` with *no* secrets assigned, which is the 401 failure mode described there. The fix for that is `onecli agents set-secrets --id <agent-id> --secret-ids <id>` (assign what it needs), not `--mode all`.
 
