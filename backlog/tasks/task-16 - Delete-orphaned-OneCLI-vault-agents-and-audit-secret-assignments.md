@@ -1,11 +1,11 @@
 ---
 id: TASK-16
 title: Delete orphaned OneCLI vault agents and audit secret assignments
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-07-31 03:19'
-updated_date: '2026-08-22 18:10'
+updated_date: '2026-08-22 18:13'
 labels:
   - security
 dependencies: []
@@ -39,10 +39,16 @@ Anything in the first list with no match in the second is an orphan.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 No OneCLI agent exists without a matching agent_groups row
-- [ ] #2 Secret assignments for deleted agents are gone, not just the agent record
-- [ ] #3 secretMode=all confirmed as intentional for each surviving agent, or narrowed
+- [x] #1 No OneCLI agent exists without a matching agent_groups row
+- [x] #2 Secret assignments for deleted agents are gone, not just the agent record
+- [x] #3 secretMode=all confirmed as intentional for each surviving agent, or narrowed
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -131,3 +137,9 @@ Commits: 3ce7dd25 (reconcile-script rewrite + credential-leak fixes + non-sequit
 
 Correction: the fixes above landed in a single commit, not two — 13980ea3 (fix(task-16): reconcile snippet unknown-state, credential-leak, and --mode-all review findings). Ignore the placeholder SHAs in the previous note.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Swept the OneCLI vault for orphaned agents, audited secret assignments, and turned the one-off check into a durable one. AC#1/AC#2 already held on arrival — the three orphans named in the task (Memory, Coder, Terminal Agent) were cleaned up by TASK-10/11/12, and the reconcile confirmed it: four vault agents (default, Radar, Aurora, Mjollnir) against four agent_groups rows, zero orphans; local-qwen3.6 has no vault agent because it never spawned a container, which is normal. The vault holds exactly one secret (Anthropic / api.anthropic.com) and no assignment referenced a dead agent. AC#3 was the owner's call and the owner chose to narrow: Radar, Aurora and Mjollnir were moved from secretMode=all to selective via 'onecli agents set-secret-mode', each already holding the Anthropic secret explicitly, so the change was verified to be a no-op for current behaviour; a second vault secret now needs a deliberate per-agent assignment. The built-in default agent was left at 'all' — verified unreachable from any container injection path (container-runner.ts:140 always populates agentIdentifier, and :141/:431 are the sole call sites, so no container ever runs as default). The eyeball-only 'onecli agents list | grep' in docs/state-discovery.md was replaced with a real reconcile that encodes the actual identifier rule from src/container-runner.ts (accepting both the ag--prefixed and raw forms, per agent-group-teardown.ts:654-655), keys off the isDefault flag rather than the literal string, and — after review — distinguishes three outcomes with three exit codes: OK=0, ORPHANS FOUND=1, UNKNOWN=2 for a missing onecli, unparseable output, an unexpected shape, or a failing q.ts query. That mirrors the absent-vs-unknown split TASK-29 closed in findOnecliAgent, so the backstop can no longer report health during an outage; all three paths were exercised with a stub onecli. Review also caught that the doc still told operators to paste bare 'onecli agents list', whose output carries a per-agent accessToken — that and every other paste-and-share site now use a --fields projection. Finally, CLAUDE.md and docs/v1-to-v2-changes.md both still prescribed '--mode all' as the 401 remedy, which would have silently reverted this narrowing on the next 401; both now lead with 'onecli agents set-secrets' and cross-reference the decision record. Docs-only otherwise; 402 tests pass, tsc --noEmit clean.
+<!-- SECTION:FINAL_SUMMARY:END -->
