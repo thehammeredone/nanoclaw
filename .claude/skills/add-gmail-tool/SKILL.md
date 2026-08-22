@@ -79,7 +79,7 @@ cat ~/.config/nanoclaw/mount-allowlist.json
 For each target agent group, confirm OneCLI will inject Gmail secrets into its container. Find the OneCLI agent ID that matches the group's `agentGroupId`:
 
 ```bash
-onecli agents list
+onecli agents list --fields=identifier,name,secretMode   # never plain `onecli agents list` — it includes accessToken
 ```
 
 If that agent's `secretMode` is `all`, you're done — Gmail secrets (identified by OneCLI's Gmail hostPattern) will auto-inject. If it's `selective`, explicitly assign the Gmail secrets using the safe merge pattern (`set-secrets` replaces the entire list — always read first):

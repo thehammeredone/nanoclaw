@@ -164,21 +164,25 @@ The SDK does not expose `setSecretMode` — the only fix is the CLI (or the web 
 
 ```bash
 # Find the agent (identifier is the agent group id)
-onecli agents list
+onecli agents list --fields=identifier,name,secretMode   # never plain `onecli agents list` in a paste — it includes accessToken
 
-# Flip to "all" so every vault secret with a matching host pattern gets injected
-onecli agents set-secret-mode --id <agent-id> --mode all
-
-# Or, stay selective and assign specific secrets
+# Primary fix: assign the specific secrets this agent needs
 onecli secrets list                                    # find secret ids
 onecli agents set-secrets --id <agent-id> --secret-ids <id1>,<id2>
 
 # Inspect what an agent currently has
 onecli agents secrets --id <agent-id>                  # secrets assigned to this agent
 onecli secrets list                                    # all vault secrets (with host patterns)
+
+# Blunt fallback only: opts the agent into every vault secret whose host pattern
+# matches, now AND in the future, not just the one it needs today. Avoid unless
+# that's actually what you want — see docs/state-discovery.md's "OneCLI vault
+# agent audit" section: this install's group agents were deliberately narrowed
+# off `all` on 2026-08-22 for exactly this reason.
+onecli agents set-secret-mode --id <agent-id> --mode all
 ```
 
-If you've just enabled `mode all`, no container restart is needed — the gateway looks up secrets per request, so the next API call from the running container will see the new credentials.
+If you've just assigned secrets (or enabled `mode all`), no container restart is needed — the gateway looks up secrets per request, so the next API call from the running container will see the new credentials.
 
 ### Requiring approval for credential use
 

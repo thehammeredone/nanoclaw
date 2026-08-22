@@ -144,8 +144,85 @@ pnpm exec tsx scripts/q.ts data/v2.db \
    left join messaging_group_agents mga on mga.messaging_group_id = mg.id
    where mga.id is null"
 
-# OneCLI vault agents with no matching agent group
-onecli agents list | grep -E '"name"|"identifier"'
+# OneCLI vault agents with no matching agent group.
+# Encodes the exact identifier rule from src/container-runner.ts:136-140:
+#   identifier = agentGroup.id            if agentGroup.id starts with a letter
+#              = "ag-" + agentGroup.id    otherwise (OneCLI requires identifiers to start with a letter)
+# The match also accepts the raw unprefixed agent_groups id, not only the `ag-`-prefixed form —
+# mirrors src/teardown/agent-group-teardown.ts:654-655 (a legacy unprefixed agent is a match, not
+# an orphan). "default" is the built-in agent (no agent group, not an orphan by design) — matched
+# by the `isDefault` flag onecli reports, not by the string "default"
+# (src/teardown/agent-group-teardown.ts:657: an agent merely *named* "default" is not the built-in).
+# An agent_groups row with no matching identifier is normal too — it just never spawned a container yet.
+#
+# Three outcomes, three exit codes — never conflate "no orphans" with "couldn't check":
+#   OK (0)            — both inputs parsed to a trustworthy shape, reconciled, zero orphans.
+#   ORPHANS FOUND (1) — reconciled, at least one onecli agent has no matching agent_groups row.
+#   UNKNOWN (2)       — onecli missing/non-zero exit, unparseable output, output that doesn't
+#                       parse to the expected shape, or a failing/empty scripts/q.ts query.
+#                       Mirrors findOnecliAgent's absent-vs-unknown split
+#                       (src/teardown/agent-group-teardown.ts:611-666): "no orphans" and
+#                       "couldn't tell" must never be printed (or exit-coded) the same way.
+#                       Note the `--fields` projection below returns a bare JSON array, not the
+#                       unfiltered call's `{"data": [...]}` envelope — the shape check matches that.
+onecli_json=$(onecli agents list --fields=identifier,name,secretMode,isDefault 2>/dev/null)   # never plain `onecli agents list` in a paste — it includes accessToken
+onecli_rc=$?
+groups_tsv=$(pnpm exec tsx scripts/q.ts data/v2.db "select id, name from agent_groups" 2>/dev/null)
+groups_rc=$?
+
+python3 - "$onecli_rc" "$onecli_json" "$groups_rc" "$groups_tsv" <<'PY'
+import json, re, sys
+
+onecli_rc, onecli_raw, groups_rc, groups_tsv = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), sys.argv[4]
+
+def unknown(msg):
+    print(f"UNKNOWN: {msg}")
+    sys.exit(2)
+
+if onecli_rc != 0:
+    unknown(f"onecli agents list exited {onecli_rc} (missing binary, or gateway down?)")
+
+try:
+    parsed = json.loads(onecli_raw)
+except json.JSONDecodeError as err:
+    unknown(f"could not parse onecli agents list output: {err}")
+
+if not isinstance(parsed, list):
+    unknown('unexpected onecli agents list shape: expected a JSON array (with --fields)')
+
+if groups_rc != 0 or not groups_tsv.strip():
+    unknown("scripts/q.ts agent_groups query failed or returned no rows")
+groups = [line.split("|", 1) for line in groups_tsv.strip().splitlines() if line.strip()]
+
+def acceptable_identifiers(gid):
+    # Mirrors findOnecliAgent's match rule (agent-group-teardown.ts:654-655): accepts
+    # the `ag-`-prefixed form AND the raw unprefixed id (legacy agents may use either).
+    prefixed = gid if re.match(r'^[a-zA-Z]', gid) else f"ag-{gid}"
+    return {prefixed, gid}
+
+try:
+    expected = {}
+    for gid, gname in groups:
+        for ident in acceptable_identifiers(gid):
+            expected[ident] = (gid, gname)
+
+    orphans = [a for a in parsed if not a.get("isDefault") and a["identifier"] not in expected]
+
+    if orphans:
+        print(f"ORPHANS FOUND: {len(orphans)}")
+        for o in orphans:
+            print(f"  identifier={o['identifier']} name={o['name']} secretMode={o.get('secretMode')}")
+        sys.exit(1)
+
+    print(f"OK: 0 orphans. {len(parsed)} onecli agents (incl. default) reconcile against {len(groups)} agent_groups rows.")
+    matched = {a["identifier"] for a in parsed}
+    unspawned = sorted({gname for gid, gname in groups if acceptable_identifiers(gid).isdisjoint(matched)})
+    if unspawned:
+        print(f"NOTE: no vault agent yet for (never spawned a container — not an orphan): {', '.join(unspawned)}")
+    sys.exit(0)
+except Exception as err:
+    unknown(f"unexpected error reconciling: {err}")
+PY
 ```
 
 ### Docker + OneCLI state
@@ -153,7 +230,7 @@ onecli agents list | grep -E '"name"|"identifier"'
 ```bash
 docker images --format '{{.Repository}}:{{.Tag}}' | grep nanoclaw
 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}'
-onecli agents list
+onecli agents list --fields=identifier,name,secretMode   # never plain `onecli agents list` in a paste — it includes accessToken
 ```
 
 ---
@@ -222,8 +299,8 @@ Authoritative writeup, with the FK evidence per step: [runbooks/agent-group-tear
 6. delete the agent_groups row
 7. rm -rf groups/<folder>/
 8. rm -rf data/v2-sessions/<agent-group-id>/
-9. delete the OneCLI vault agent and its secret assignments
-10. remove the per-group docker image tag
+9. remove the per-group docker image tag
+10. delete the OneCLI vault agent and its secret assignments
 11. decide on now-orphaned messaging groups
 12. edit prose references in surviving groups' CLAUDE.md / CLAUDE.local.md       (not automatable)
 ```
@@ -242,7 +319,40 @@ Step 7 is the one a resumed run cannot finish on its own: the folder lived only 
 | `groups/<folder>/` | `agent_groups.folder` | CLAUDE.md, CLAUDE.local.md, `.claude-fragments/`, skills, materialized `container.json` |
 | `data/v2-sessions/<agent-group-id>/<session-id>/` | agent group id, then session id | `inbound.db` + `outbound.db`; can outlive its `sessions` row |
 | Docker image tag | `nanoclaw-agent-v2-<install-slug>:<agent-group-id>` | Slug is derived from the project root path (`src/install-slug.ts:27`) so parallel installs on one host don't clobber each other. Only groups that have been built have a tag |
-| OneCLI vault agent | `identifier` = agent group id | Auto-created by `ensureAgent` on first spawn (`src/container-runner.ts:429`). Identifiers must start with a letter, so ids beginning with a digit get an `ag-` prefix (`src/container-runner.ts:139`) — `54c8dbdf-…` becomes `ag-54c8dbdf-…`, while `f09aa5a1-…` is used as-is. Never removed automatically |
+| OneCLI vault agent | `identifier` = agent group id | Auto-created by `ensureAgent` on first spawn (`src/container-runner.ts:429`). Identifiers must start with a letter, so ids beginning with a digit get an `ag-` prefix (`src/container-runner.ts:139-140`) — `54c8dbdf-…` becomes `ag-54c8dbdf-…`, while `f09aa5a1-…` is used as-is. As of TASK-14/29, removed automatically as step 10 of `scripts/delete-agent-group.ts` teardown — see below |
+
+### OneCLI vault agent audit (2026-08-22)
+
+Ran the reconcile snippet above and cross-checked by hand against `select id, name from agent_groups`. Result: **zero orphans.** `onecli agents list` returned exactly four agents; every non-default one maps to a live `agent_groups` row via the identifier rule:
+
+| OneCLI identifier | name | agent_groups id | agent_groups name | secretMode |
+|---|---|---|---|---|
+| `default` | Default Agent | — (built-in, no agent group) | — | all |
+| `ag-740a6fb3-5aff-42e8-b5dd-0a8a57d6b4a5` | Radar | `740a6fb3-5aff-42e8-b5dd-0a8a57d6b4a5` | Radar | selective |
+| `ag-1782273071167-th1q6f` | Aurora | `ag-1782273071167-th1q6f` | Aurora | selective |
+| `ag-1779381936325-6ki38t` | Mjollnir | `ag-1779381936325-6ki38t` | Mjollnir | selective |
+
+The three group agents were `all` when this audit began and were **narrowed to `selective` on 2026-08-22** — see below.
+
+`local-qwen3.6` (`103c34dd-8610-4bd6-9fa0-b9b98f79941d`) has no vault agent — it has never spawned a container, so that is expected, not an orphan.
+
+The three orphans named in TASK-16's original description (Memory, Coder, Terminal Agent) are already gone; they were cleaned up by earlier teardown work (TASK-10/11/12) before this audit ran.
+
+**Secret assignment audit.** `onecli secrets list` shows exactly one vault secret: `6387482f-2fac-4ce4-a1bf-eb34633576b3` ("Anthropic", type `anthropic`, host pattern `api.anthropic.com`). `onecli agents secrets --id <id>` for each of Radar, Aurora, and Mjollnir returns that one secret id explicitly assigned; Default Agent's assignment list is empty. No assignment references a non-existent agent — AC#2 holds with nothing to clean up.
+
+**secretMode narrowed to `selective` (2026-08-22).** Every non-default agent was `secretMode: "all"` — any vault secret whose host pattern matches gets injected into every request from that agent, no per-agent opt-in. With exactly one secret in the vault, `all` and "selective, assigned to that one secret" were **functionally identical**: there was nothing else `all` could inject. That equivalence would have broken the moment a second secret was added — a new credential with a matching host pattern would auto-flow into Radar, Aurora, and Mjollnir with no additional step, whether or not that agent's task needed it.
+
+The owner's decision was to narrow rather than confirm `all`. Radar, Aurora, and Mjollnir were set to `selective` via `onecli agents set-secret-mode --id <agent-id> --mode selective`; each already held the Anthropic secret as an explicit assignment, so the change was verified to be a no-op for current behaviour (assignment lists unchanged, still `["6387482f-…"]`). A second vault secret now requires a deliberate `onecli agents set-secrets` per agent that should receive it.
+
+`default` (the built-in agent) was **left at `all`** — it is not tied to an agent group and no container ever runs under it: `container-runner.ts:140` always computes a non-empty `agentIdentifier` (the agent group id, `ag-`-prefixed when it starts with a digit), `:141` is the only `buildContainerArgs` call site and `:431` the only `applyContainerConfig` call, both threading that identifier through — so the `if (agentIdentifier)` guard at `:428` is unreachable and `default` is never the identity a container is spawned or credentialed as. Narrowing it had no security benefit and some risk of breaking OneCLI's own defaults.
+
+Note the interaction with the CLAUDE.md gotcha "Gotcha: auto-created agents start in `selective` secret mode": a **newly** auto-created agent group starts at `selective` with *no* secrets assigned, which is the 401 failure mode described there. The fix for that is `onecli agents set-secrets --id <agent-id> --secret-ids <id>` (assign what it needs), not `--mode all`.
+
+### Vault-agent orphans: where the guarantee now lives
+
+TASK-14 added, and TASK-29 hardened, deletion of the OneCLI vault agent as **step 10** of `scripts/delete-agent-group.ts` teardown (`src/teardown/agent-group-teardown.ts`, `onecliAgent` deletion around line 1020-1023: `onecli agents delete --id <id>`, removing the agent and its secret assignments — shared vault secrets themselves survive). Critically, the tool does not just skip this step silently when it can't confirm: `findOnecliAgent` (`src/teardown/agent-group-teardown.ts:624-666`) treats a failed exec, unparseable JSON, or an unexpected response shape from `onecli agents list` as `unknown: true`, distinct from "no vault agent exists" (`agent: null`). That propagates to the plan's `onecliUnknown` flag, which `collectIncomplete` (`scripts/delete-agent-group.ts:153`) surfaces as an incomplete-teardown line, driving `process.exit(2)` — "executed but incomplete" — rather than a silent exit 0. So a run that can't verify the vault-agent state cannot report success.
+
+Net effect: the orphan class this task was filed against is now closed **at the source** — a group deleted through the standard teardown path cannot leave its vault agent behind without also leaving a nonzero exit code. The reconcile snippet above is a **backstop** (catches manual `ncl groups delete` on an unwired group, `onecli` outages during a past teardown, or drift from before TASK-14 existed) rather than the primary control.
 
 ### Scheduling is session-scoped and wiring-independent
 
