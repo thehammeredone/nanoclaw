@@ -1,9 +1,11 @@
 ---
 id: TASK-24
 title: Re-audit Aurora's CLAUDE.local.md auth and error-handling rules
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-20 15:01'
+updated_date: '2026-08-24 04:10'
 labels:
   - aurora
   - skylight
