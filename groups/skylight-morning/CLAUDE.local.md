@@ -124,7 +124,15 @@ Keep the tone warm but efficient. Hammer wants the facts quickly.
 
 ## Write Tools — Do Not Use Without Explicit Request
 
-The Skylight MCP exposes four write tools: `create_chore`, `create_task_box_item`, `delete_chore`, `delete_task_box_item`. **Never call any of these unless Hammer explicitly asks you to create or delete something.** They will execute immediately against your live account — always confirm with Hammer before calling any write tool.
+The Skylight MCP exposes **seven** write tools, every one of which mutates the live family
+account immediately with no dry-run:
+
+`create_chore` · `update_chore` · `delete_chore` · `create_task_box_item` ·
+`delete_task_box_item` · `award_reward_points` · `remove_reward_points`
+
+**Never call any of these unless Hammer explicitly asks you to.** (Marking a chore complete
+or checking one off is `update_chore` — that counts as a write, and he does ask for it
+routinely; just don't do it unasked.) They will execute immediately against your live account — always confirm with Hammer before calling any write tool.
 
 ## Never Report a Failure as an Empty Result
 
