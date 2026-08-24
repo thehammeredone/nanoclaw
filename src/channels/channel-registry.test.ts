@@ -299,6 +299,136 @@ describe('channel registry — transient setup retry (TASK-21)', () => {
     expect(_pendingBackgroundRetryCount()).toBe(0);
   });
 
+  it('retries a fetch-shaped TypeError whose real code lives on err.cause (ENOTFOUND)', async () => {
+    const { registerChannelAdapter, initChannelAdapters, getActiveAdapters, _resetForTests } =
+      await import('./channel-registry.js');
+    _resetForTests();
+    vi.useFakeTimers();
+
+    let calls = 0;
+    const adapter = createMockAdapter('dns-cold-boot');
+    adapter.setup = vi.fn(async () => {
+      calls += 1;
+      if (calls < 2) {
+        // Node's fetch rejects with a TypeError whose top-level `code` is
+        // undefined — the real DNS error code is nested under `cause`.
+        const err = new TypeError('fetch failed') as TypeError & { cause?: unknown };
+        err.cause = { code: 'ENOTFOUND' };
+        throw err;
+      }
+    });
+
+    registerChannelAdapter('dns', { factory: () => adapter });
+
+    const initPromise = initChannelAdapters(setupFn);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await initPromise;
+
+    expect(calls).toBe(2);
+    expect(getActiveAdapters().some((a) => a.channelType === 'dns-cold-boot')).toBe(true);
+  });
+
+  it('retries a {status, statusCode} shaped error even when `status` is non-numeric', async () => {
+    const { registerChannelAdapter, initChannelAdapters, getActiveAdapters, _resetForTests } =
+      await import('./channel-registry.js');
+    _resetForTests();
+    vi.useFakeTimers();
+
+    let calls = 0;
+    const adapter = createMockAdapter('axios-503');
+    adapter.setup = vi.fn(async () => {
+      calls += 1;
+      if (calls < 2) {
+        // `??` would short-circuit on the non-nullish, non-numeric `status`
+        // and never reach the real numeric `statusCode`.
+        const err = new Error('Request failed') as Error & { status: string; statusCode: number };
+        err.status = 'ERR_BAD_RESPONSE';
+        err.statusCode = 503;
+        throw err;
+      }
+    });
+
+    registerChannelAdapter('axios', { factory: () => adapter });
+
+    const initPromise = initChannelAdapters(setupFn);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await initPromise;
+
+    expect(calls).toBe(2);
+    expect(getActiveAdapters().some((a) => a.channelType === 'axios-503')).toBe(true);
+  });
+
+  it('retries a got-shaped "Response code 502 (Bad Gateway)" HTTPError', async () => {
+    const { registerChannelAdapter, initChannelAdapters, getActiveAdapters, _resetForTests } =
+      await import('./channel-registry.js');
+    _resetForTests();
+    vi.useFakeTimers();
+
+    let calls = 0;
+    const adapter = createMockAdapter('got-502');
+    adapter.setup = vi.fn(async () => {
+      calls += 1;
+      if (calls < 2) {
+        const err = new Error('Response code 502 (Bad Gateway)');
+        err.name = 'HTTPError';
+        throw err;
+      }
+    });
+
+    registerChannelAdapter('got', { factory: () => adapter });
+
+    const initPromise = initChannelAdapters(setupFn);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await initPromise;
+
+    expect(calls).toBe(2);
+    expect(getActiveAdapters().some((a) => a.channelType === 'got-502')).toBe(true);
+  });
+
+  it('does not repopulate activeAdapters or schedule anything when teardown races an in-flight setup', async () => {
+    const {
+      registerChannelAdapter,
+      initChannelAdapters,
+      teardownChannelAdapters,
+      getActiveAdapters,
+      _pendingBackgroundRetryCount,
+      _resetForTests,
+    } = await import('./channel-registry.js');
+    _resetForTests();
+    vi.useFakeTimers();
+
+    let resolveSetup: (() => void) | undefined;
+    const adapter = createMockAdapter('teardown-race');
+    adapter.setup = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSetup = resolve;
+        }),
+    );
+
+    registerChannelAdapter('race', { factory: () => adapter });
+
+    const initPromise = initChannelAdapters(setupFn);
+    // Flush microtasks so registration.factory() → setupFn() → adapter.setup()
+    // has run and is now parked awaiting resolveSetup() — nothing here
+    // touches fake-timer macrotasks, so plain microtask flushes suffice.
+    for (let i = 0; i < 5 && !resolveSetup; i++) {
+      await Promise.resolve();
+    }
+    expect(adapter.setup).toHaveBeenCalledTimes(1);
+
+    // Teardown runs while the setup() attempt is still in flight — it can
+    // clear activeAdapters/timers but cannot interrupt the pending await.
+    await teardownChannelAdapters();
+
+    // Now let the stale attempt resolve, after teardown already ran.
+    resolveSetup?.();
+    await initPromise;
+
+    expect(getActiveAdapters().some((a) => a.channelType === 'teardown-race')).toBe(false);
+    expect(_pendingBackgroundRetryCount()).toBe(0);
+  });
+
   it('recovers a channel via background retry after the in-window ladder is exhausted', async () => {
     const {
       registerChannelAdapter,
