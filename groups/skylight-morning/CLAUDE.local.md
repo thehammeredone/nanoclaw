@@ -130,11 +130,15 @@ The Skylight MCP exposes four write tools: `create_chore`, `create_task_box_item
 
 **A tool that errored did not return "nothing" — it returned nothing *usable*.** The empty-state lines in the templates above ("No chores due today.", "Nothing on the calendar tomorrow.", "No events scheduled today.") mean *the call succeeded and the list was genuinely empty*. Only use them when you actually received a successful, empty response.
 
-If a call failed for any reason, that section must say so instead:
+If **one** call failed, that section must say so instead:
 ```
 ⚠️ **Dad's Chores — unavailable**
 Skylight call failed: <the actual error text, verbatim>
 ```
+
+If **several** sections failed for the same reason, don't repeat this block per section —
+lead with a single diagnostic instead. See "When Something Fails — One Diagnostic, Not a
+Failure in Every Section".
 
 Before sending a report where a whole section is empty, check: did that call *succeed*? If you cannot point to a successful response, it is a failure — report it as one. A silently empty briefing is worse than no briefing, because Hammer will act on it as if the day is clear.
 
