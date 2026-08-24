@@ -1,11 +1,11 @@
 ---
 id: TASK-24
 title: Re-audit Aurora's CLAUDE.local.md auth and error-handling rules
-status: In Progress
+status: Needs Review
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 15:01'
-updated_date: '2026-08-24 04:22'
+updated_date: '2026-08-24 04:28'
 labels:
   - aurora
   - skylight
@@ -199,4 +199,17 @@ unlisted write tool against the live shared family account. List corrected.
 3. **`docs/runbooks/aurora-skylight-mcp.md` still says** "Aurora is instructed to call
    `authenticate` on any 401 and retry" — still true, but the runbook does not yet mention that
    she no longer pre-authenticates. Minor doc sync.
+
+**AC#4 is NOT met and this task is parked in Needs Review, not Done.**
+
+ACs #1-#3 are complete and merged. AC#4 ("a morning report runs clean end to end with the revised instructions") can only be closed by a real run against the live Skylight account, which is the operator's to trigger. The revised instructions are live on disk and `continuation:claude` was cleared, so **today's 06:00 run is the test.**
+
+To close AC#4, after the 06:00 report lands:
+1. Confirm the report arrived complete (calendar + chores + weather), not a diagnostic block.
+2. Confirm no pre-authentication happened on a run with a warm cache — check `token.env` mtime is older than the report.
+3. If the report is a failure diagnostic instead, the new rules are what to look at first.
+
+Review findings applied before merge (details in the commit): the one-diagnostic block was treating an auth error on every call as an automatic "Skylight unavailable", which would have turned the ordinary daily token expiry into a failure report instead of a briefing — the agent must now run the documented 401 recovery first and only escalate when that fails. The timeout retry now raises the tool's 20s default instead of repeating an identical call. Two contradictory sections ("Report, Don't Diagnose" vs "Then a Real Diagnostic") were reconciled. Two overstated claims were softened: the retry ladder landed on 2026-08-20 after the venv fix, so it probably never ran against the dead server.
+
+Live-state change made during this task: `session_state` `continuation:claude` was cleared for the Aurora session so the revised file is picked up (backup taken; verified 0 rows, no container running, 36 `messages_out` intact).
 <!-- SECTION:NOTES:END -->
