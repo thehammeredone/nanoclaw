@@ -17,9 +17,9 @@ For other messages (follow-up questions, corrections, casual chat), reply direct
 
 ### API Call Sequence
 
-**Step 1 — Authenticate first.** Always call `mcp__skylight__authenticate` before any other Skylight tool. Do not skip this even if a cached token exists.
+**Step 1 — Do *not* pre-authenticate. Use the cached token.** Go straight to the data calls below. Call `mcp__skylight__authenticate` only when a Skylight call actually tells you to — see "Auth Errors" below. (This reverses an earlier "always authenticate first" rule; the reasoning is recorded in "Why We No Longer Authenticate First".)
 
-**Step 2 — Fire the remaining calls in parallel** (after authenticate completes):
+**Step 2 — Fire all four data calls in parallel:**
 
 **1. Calendar events for today:**
 ```
@@ -138,23 +138,116 @@ Skylight call failed: <the actual error text, verbatim>
 
 Before sending a report where a whole section is empty, check: did that call *succeed*? If you cannot point to a successful response, it is a failure — report it as one. A silently empty briefing is worse than no briefing, because Hammer will act on it as if the day is clear.
 
-## 401 Error Handling
+## Auth Errors — 401 or Missing Token
 
-If any Skylight tool returns a 401 Unauthorized error, the session token has expired. Call the `authenticate` tool to capture a fresh token via headless Chromium, then retry the failed call. No action from Hammer is needed unless `authenticate` itself fails.
+The Skylight token is an opaque session token with **no refresh flow**. It is cached at
+`/workspace/.skylight/token.env` (per session, persists across container restarts) and the
+MCP server re-reads that file on *every* tool call, so a token captured on a previous run is
+already in effect before you do anything.
 
-## When `authenticate` Times Out — Retry, Don't Give Up
+Two errors mean "the cached token is not usable", and both are self-service:
 
-If `authenticate` times out, **retry with escalating waits: 60s → 120s → 240s.** Only report failure after all three retries are exhausted. Never give up on the first timeout — Hammer needs these reports to work.
+| What you get back | What it means |
+|---|---|
+| `401 unauthorized: the Skylight token is invalid or expired. Re-authenticate: run the authenticate tool …` | the cached token expired |
+| `Skylight token is missing or empty. Set SKYLIGHT_TOKEN (capture one with the MCP authenticate step)…` | fresh session, nothing cached yet |
+
+On either one: call `authenticate` **once**, then retry the failed call(s). If you fired the
+data calls in parallel and they all came back with the same auth error, one `authenticate`
+fixes all of them — re-run the whole batch, don't authenticate per call. No action from
+Hammer is needed unless `authenticate` itself fails.
+
+### Why We No Longer Authenticate First
+
+*Recorded 2026-08-24. This replaces the "always call authenticate first, even if a cached
+token exists" rule that stood from 2026-07-30 to 2026-08-24.*
+
+That rule was written to work around morning reports that came back empty. The cause was
+**never** authentication: the session's Skylight virtualenv had been left half-installed
+(the wheel but none of its ~70 dependencies), so the MCP server died on import and no
+Skylight tool could work no matter how many times it authenticated. That is fixed — the
+MCP bootstrap now verifies `import server.app` before it will start the server, and refuses
+to start loudly instead of failing silently (see `docs/runbooks/aurora-skylight-mcp.md`).
+
+Pre-authenticating every run is a full headless-Chromium login against the real Skylight
+web app, before a single piece of data is fetched. It is the slowest thing in the report and
+the most likely to fail. It buys nothing, because the failure it was meant to prevent —
+a stale token — is already handled: an expired token returns a clean, non-retried 401 whose
+text *names the fix*, and a missing token returns an equally explicit message. Both are
+caught by the rule above, at the cost of one extra round-trip on the rare run where the
+token has actually gone stale.
+
+So: try the cached token first, re-authenticate on demand. If you ever find yourself
+authenticating on **every** run, the token cache is not persisting — that is an
+infrastructure bug worth reporting to Hammer, not something to paper over by
+pre-authenticating.
+
+## When `authenticate` Times Out — One Retry, Then a Real Diagnostic
+
+If `authenticate` times out, **wait 60 seconds and try exactly once more.** If the second
+attempt also times out, stop and report — with the diagnostic described below, not a bare
+"couldn't authenticate".
+
+*Recorded 2026-08-24. This replaces the 60s → 120s → 240s escalating ladder agreed in chat
+on 2026-08-20, and it is a deliberate narrowing of that instruction — flag it to Hammer if
+he expects the old behaviour.* The ladder was written on the assumption that the server was
+alive and merely slow. It wasn't: it was dead on arrival, and the ladder spent ~7 minutes
+plus four Chromium launches retrying something that was never going to answer, which is most
+of the budget for a report that is supposed to land at 6 AM. That specific failure can no
+longer masquerade as a timeout — a broken MCP server now fails at startup with an explicit
+`skylight-mcp: PROVISIONING FAILED (…)` / `STARTUP FAILED (…)` message, and its tools are
+simply absent rather than slow.
+
+So the retry now covers only what a retry can actually fix — a genuinely transient slow
+login or network blip, which one retry catches. **If the Skylight tools are missing
+entirely, or a call fails because the MCP server did not start, do not retry at all.** That
+is not a timeout; report it immediately and quote the startup error.
+
+Hammer's underlying ask still stands: don't throw your hands in the air. Retrying is not the
+only way to honour it — a fast, accurate diagnostic is more useful to him than seven minutes
+of silence followed by the same failure.
+
+## When Something Fails — One Diagnostic, Not a Failure in Every Section
+
+When a single root cause takes out several sections — and an auth failure always does — do
+**not** render the same error four times, once per section. Hammer asked for this directly
+on 2026-08-20: *"if something isn't working, give me a bit of a diagnostic, as opposed to all
+of the sections with Cant auth / Cant auth / Cant auth / Cant auth."*
+
+Lead with one short diagnostic block, then send whatever *did* work:
+
+```
+⚠️ **Skylight unavailable** — calendar and chores are both out.
+What failed: `authenticate` (2 attempts, 60s apart)
+Error: <the error text, verbatim>
+What still works: weather (below)
+```
+
+Then include the sections that succeeded as normal. One clear statement of the failure, its
+scope, and what you still have — never the same error repeated per section, and never an
+empty-state line standing in for a failure.
 
 ## When `authenticate` Fails — Report, Don't Diagnose
 
-If `authenticate` itself fails (after retries), **quote the error verbatim and stop there.** Do not infer a cause, and in particular do not tell Hammer that credentials are missing or need to be set up — your credentials are supplied as environment variables on the MCP server (`SKYLIGHT_EMAIL` / `SKYLIGHT_PASSWORD`) and are already configured. The `~/.config/skylight/credentials.env` path mentioned in the tool's own docstring is a fallback for standalone CLI use and is **not** how you are wired.
+If `authenticate` itself fails (after the retry), **quote the error verbatim and stop
+there.** Do not infer a cause, and in particular do not tell Hammer that credentials are
+missing or need to be set up — your credentials are supplied as environment variables on the
+MCP server (`SKYLIGHT_EMAIL` / `SKYLIGHT_PASSWORD`) and are already configured. The
+`~/.config/skylight/credentials.env` path mentioned in the tool's own docstring is a
+fallback for standalone CLI use and is **not** how you are wired.
 
-Never ask Hammer for his Skylight email or password. If you think you need them, you have misread the error.
+Never ask Hammer for his Skylight email or password. If you think you need them, you have
+misread the error.
 
-Common real causes, for context only — still quote the error rather than asserting one of these:
-- `BrowserType.launch: Executable doesn't exist at …ms-playwright…` → the container's Chromium is not wired to Playwright. An infrastructure problem; Hammer needs to fix the container, not send you anything.
-- A timeout with no captured token → Skylight's login page changed, or the network is blocked.
+Common real causes, for context only — still quote the error rather than asserting one of
+these:
+- `BrowserType.launch: Executable doesn't exist at …ms-playwright…` → the container's
+  Chromium is not wired to Playwright. An infrastructure problem; Hammer needs to fix the
+  container, not send you anything.
+- `skylight-mcp: PROVISIONING FAILED (…)` or `STARTUP FAILED (…)` → the MCP server never
+  started. Quote the parenthesised reason; it names the actual fault. Do not retry.
+- A timeout with no captured token → Skylight's login page changed, or the network is
+  blocked.
 
 ## Other Errors
 
