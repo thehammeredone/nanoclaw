@@ -60,3 +60,6 @@ matrix-credentials.local.md
 **/.claude/statusline.json
 
 agents-sdk-docs
+
+# Per-session scheduler lock (pid + session id) — churns on every Claude Code session
+.claude/scheduled_tasks.lock
