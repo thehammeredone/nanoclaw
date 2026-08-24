@@ -174,8 +174,8 @@ Hammer is needed unless `authenticate` itself fails.
 *Recorded 2026-08-24. This replaces the "always call authenticate first, even if a cached
 token exists" rule that stood from 2026-07-30 to 2026-08-24.*
 
-That rule was written to work around morning reports that came back empty. The cause was
-**never** authentication: the session's Skylight virtualenv had been left half-installed
+That rule was written to work around morning reports that came back empty. The cause turned
+out not to be authentication at all: the session's Skylight virtualenv had been left half-installed
 (the wheel but none of its ~70 dependencies), so the MCP server died on import and no
 Skylight tool could work no matter how many times it authenticated. That is fixed — the
 MCP bootstrap now verifies `import server.app` before it will start the server, and refuses
@@ -189,23 +189,28 @@ text *names the fix*, and a missing token returns an equally explicit message. B
 caught by the rule above, at the cost of one extra round-trip on the rare run where the
 token has actually gone stale.
 
-So: try the cached token first, re-authenticate on demand. If you ever find yourself
-authenticating on **every** run, the token cache is not persisting — that is an
-infrastructure bug worth reporting to Hammer, not something to paper over by
-pre-authenticating.
+So: try the cached token first, re-authenticate on demand. Authenticating once at the start
+of a **new** session is normal — the token cache lives in the session directory, so a fresh
+session has nothing cached yet. What is not normal is authenticating on every run *within*
+the same session: that means the cache is not persisting, which is an infrastructure bug
+worth reporting to Hammer rather than papering over by pre-authenticating.
 
 ## When `authenticate` Times Out — One Retry, Then a Real Diagnostic
 
-If `authenticate` times out, **wait 60 seconds and try exactly once more.** If the second
-attempt also times out, stop and report — with the diagnostic described below, not a bare
+If `authenticate` times out, **wait 60 seconds and try exactly once more — with a longer
+timeout.** The tool takes a `timeout` parameter that defaults to 20s; pass roughly double
+(`timeout=45`) on the retry, since an identical retry cannot fix the one thing this retry is
+for. If the second attempt also times out, stop and report — with the diagnostic described below, not a bare
 "couldn't authenticate".
 
 *Recorded 2026-08-24. This replaces the 60s → 120s → 240s escalating ladder agreed in chat
 on 2026-08-20, and it is a deliberate narrowing of that instruction — flag it to Hammer if
 he expects the old behaviour.* The ladder was written on the assumption that the server was
-alive and merely slow. It wasn't: it was dead on arrival, and the ladder spent ~7 minutes
-plus four Chromium launches retrying something that was never going to answer, which is most
-of the budget for a report that is supposed to land at 6 AM. That specific failure can no
+alive and merely slow. That assumption did not hold for the failure that prompted it —
+the server was dead on arrival, and a ladder like this one would have spent up to ~7 minutes
+retrying something that was never going to answer, most of the budget for a report that is
+supposed to land at 6 AM. (The ladder was written on 2026-08-20, after the venv fix landed,
+so it probably never ran against the dead server itself.) That specific failure can no
 longer masquerade as a timeout — a broken MCP server now fails at startup with an explicit
 `skylight-mcp: PROVISIONING FAILED (…)` / `STARTUP FAILED (…)` message, and its tools are
 simply absent rather than slow.
@@ -221,8 +226,14 @@ of silence followed by the same failure.
 
 ## When Something Fails — One Diagnostic, Not a Failure in Every Section
 
-When a single root cause takes out several sections — and an auth failure always does — do
-**not** render the same error four times, once per section. Hammer asked for this directly
+When a single root cause takes out several sections, do **not** render the same error four
+times, once per section.
+
+**First, make sure it is actually unrecoverable.** An auth error on every call is *not* a
+failure — it is the ordinary stale-token path above, and you have not failed until you have
+called `authenticate` once and re-run the batch. Only reach for this block when the recovery
+itself failed: `authenticate` errored or timed out twice, the tools are missing, or the
+retried calls came back broken for a non-auth reason. Hammer asked for this directly
 on 2026-08-20: *"if something isn't working, give me a bit of a diagnostic, as opposed to all
 of the sections with Cant auth / Cant auth / Cant auth / Cant auth."*
 
@@ -239,10 +250,12 @@ Then include the sections that succeeded as normal. One clear statement of the f
 scope, and what you still have — never the same error repeated per section, and never an
 empty-state line standing in for a failure.
 
-## When `authenticate` Fails — Report, Don't Diagnose
+## When `authenticate` Fails — Report the Error, Don't Guess at Its Cause
 
-If `authenticate` itself fails (after the retry), **quote the error verbatim and stop
-there.** Do not infer a cause, and in particular do not tell Hammer that credentials are
+If `authenticate` itself fails (after the retry), **quote the error verbatim** and report it
+using the diagnostic block above — what failed, the error text, and what still works. That
+diagnostic is a description of *scope*, which is what Hammer asked for; it is not a theory
+about the cause. Do not infer a cause, and in particular do not tell Hammer that credentials are
 missing or need to be set up — your credentials are supplied as environment variables on the
 MCP server (`SKYLIGHT_EMAIL` / `SKYLIGHT_PASSWORD`) and are already configured. The
 `~/.config/skylight/credentials.env` path mentioned in the tool's own docstring is a
