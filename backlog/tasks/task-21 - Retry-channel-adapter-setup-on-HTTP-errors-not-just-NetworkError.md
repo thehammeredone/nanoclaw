@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 03:41'
-updated_date: '2026-08-24 02:49'
+updated_date: '2026-08-24 03:11'
 labels:
   - channels
   - reliability
@@ -40,3 +40,23 @@ See also docs/runbooks/matrix-homeserver-resume.md, which documents this same ch
 - [ ] #2 A single transient error during adapter setup no longer permanently kills the channel for the rest of the process lifetime
 - [ ] #3 Decide and document a retry ceiling so a truly broken credential/config still fails fast rather than retrying forever
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented in `src/channels/channel-registry.ts`.
+
+**Classifier.** `isNetworkError` replaced by `isTransientSetupError`, which treats as transient: `NetworkError`, `AbortError`/`TimeoutError`, HTTP 429 and 5xx, and connection/DNS error codes (`ETIMEDOUT`, `ECONNRESET`, `ECONNREFUSED`, `EAI_AGAIN`, `ENOTFOUND`, `EHOSTUNREACH`, `ENETUNREACH`). Status is read defensively from `status`, `statusCode`, `httpStatus`, `response.status`, `response.statusCode`, each validated as an integer in 100-599, and finally sniffed from the message text — matching both the incident's `HTTPError: Server returned 502 error` and got's `HTTPError: Response code 502 (Bad Gateway)`. All 4xx other than 429 remain non-transient by design, so a bad token still fails fast (AC#3).
+
+Both the code and the status lookups walk the `err.cause` chain (depth-bounded at 5, cycle-guarded). This was a round-2 fix and it is the one that matters most in practice: Node's `fetch` rejects with `TypeError: fetch failed` whose own `code` is `undefined` and whose `cause.code` holds the real DNS code — so without the cause-walk, the cold-boot DNS failure this runbook already documented would still have died with zero retries.
+
+**Two ladders (AC#1, AC#2).** In-window 2s/5s/10s (3 retries) during startup; if still transient after that, a background ladder of 6 more attempts at 15s/30s/60s/120s/240s/300s. Timers are `unref()`ed so a pending retry cannot hold the process open. On success the adapter is added to `activeAdapters`; on a non-transient error or the ceiling, it gives up permanently and logs `Channel adapter background retry ceiling reached, giving up permanently`.
+
+**Ceiling (AC#3).** 3 + 6 = 9 retries, ~13 minutes of wall clock, documented in a header comment block in `channel-registry.ts` and in `docs/runbooks/matrix-homeserver-resume.md`, including which log line means an operator restart is genuinely required.
+
+**Teardown cancellation.** A retry chain in flight when `teardownChannelAdapters()` runs is cancelled via a generation counter checked immediately after every `adapter.setup()` await (both ladders, both the resolve and throw paths). Without it a late-resolving attempt could repopulate `activeAdapters` after shutdown, or schedule a timer into just-cleared state — which also leaked across test files, since `teardownChannelAdapters()` is the `afterEach` in `src/modules/approvals/picks.test.ts` and `src/modules/permissions/permissions.test.ts`.
+
+**Tests.** 8 new vitest cases in `src/channels/channel-registry.test.ts` (fake timers, no real waits): 502 retried then succeeds, 401 fails fast with one call, background recovery after the in-window ladder, ceiling reached and terminates, cause-chain `ENOTFOUND`, non-numeric `status` field, got-shaped 502, teardown-during-in-flight-setup. Full suite 428/428, `pnpm run build` clean.
+
+**Deferred to TASK-32** (Minor review findings, none blocking): `setup()` is re-invoked on the same adapter instance without an intervening `teardown()`, so a late-throwing attempt can orphan Chat SDK sync loops/listeners; 429 ignores `Retry-After`; the in-window ladder is serial and on the startup critical path (~17s per channel on a cold network); test-only exports land in `dist`.
+<!-- SECTION:NOTES:END -->
