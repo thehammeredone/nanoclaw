@@ -233,3 +233,149 @@ describe('channel + router integration', () => {
     expect((mockAdapter.delivered[0].content as { text: string }).text).toBe('Agent response');
   });
 });
+
+describe('channel registry — transient setup retry (TASK-21)', () => {
+  const setupFn = () => ({
+    conversations: [],
+    onInbound: () => {},
+    onInboundEvent: () => {},
+    onMetadata: () => {},
+    onAction: () => {},
+  });
+
+  afterEach(async () => {
+    const { _resetForTests } = await import('./channel-registry.js');
+    _resetForTests();
+    vi.useRealTimers();
+  });
+
+  it('retries an HTTPError-shaped 502 during the in-window ladder and eventually succeeds', async () => {
+    const { registerChannelAdapter, initChannelAdapters, getActiveAdapters, _resetForTests } =
+      await import('./channel-registry.js');
+    _resetForTests();
+    vi.useFakeTimers();
+
+    let calls = 0;
+    const adapter = createMockAdapter('matrix-502');
+    adapter.setup = vi.fn(async () => {
+      calls += 1;
+      if (calls < 3) {
+        const err = new Error('Server returned 502 error');
+        err.name = 'HTTPError';
+        throw err;
+      }
+    });
+
+    registerChannelAdapter('matrix', { factory: () => adapter });
+
+    const initPromise = initChannelAdapters(setupFn);
+    // Covers the 2s + 5s in-window retry delays with headroom.
+    await vi.advanceTimersByTimeAsync(20_000);
+    await initPromise;
+
+    expect(calls).toBe(3);
+    expect(getActiveAdapters().some((a) => a.channelType === 'matrix-502')).toBe(true);
+  });
+
+  it('fails fast on a 401-shaped error with no retry at all', async () => {
+    const { registerChannelAdapter, initChannelAdapters, getActiveAdapters, _pendingBackgroundRetryCount } =
+      await import('./channel-registry.js');
+
+    let calls = 0;
+    const adapter = createMockAdapter('bad-creds');
+    adapter.setup = vi.fn(async () => {
+      calls += 1;
+      const err = new Error('Unauthorized') as Error & { status: number };
+      err.status = 401;
+      throw err;
+    });
+
+    registerChannelAdapter('bad', { factory: () => adapter });
+
+    await initChannelAdapters(setupFn);
+
+    expect(calls).toBe(1);
+    expect(getActiveAdapters().some((a) => a.channelType === 'bad-creds')).toBe(false);
+    expect(_pendingBackgroundRetryCount()).toBe(0);
+  });
+
+  it('recovers a channel via background retry after the in-window ladder is exhausted', async () => {
+    const {
+      registerChannelAdapter,
+      initChannelAdapters,
+      getActiveAdapters,
+      _pendingBackgroundRetryCount,
+      _resetForTests,
+    } = await import('./channel-registry.js');
+    _resetForTests();
+    vi.useFakeTimers();
+
+    let calls = 0;
+    const adapter = createMockAdapter('matrix-recovers-late');
+    adapter.setup = vi.fn(async () => {
+      calls += 1;
+      // The in-window ladder makes 4 calls total (1 initial + 3 retries, at
+      // 0s/2s/5s/10s) and all fail; the 5th call (1st background attempt,
+      // 15s later) succeeds.
+      if (calls < 5) {
+        const err = new Error('Server returned 502 error');
+        err.name = 'HTTPError';
+        throw err;
+      }
+    });
+
+    registerChannelAdapter('matrix', { factory: () => adapter });
+
+    const initPromise = initChannelAdapters(setupFn);
+    // Exhaust the in-window ladder (2s + 5s + 10s).
+    await vi.advanceTimersByTimeAsync(20_000);
+    await initPromise;
+
+    // In-window ladder exhausted; not yet recovered, background retry scheduled.
+    expect(getActiveAdapters().some((a) => a.channelType === 'matrix-recovers-late')).toBe(false);
+    expect(_pendingBackgroundRetryCount()).toBe(1);
+
+    // First background attempt (15s delay) succeeds.
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    expect(calls).toBe(5);
+    expect(getActiveAdapters().some((a) => a.channelType === 'matrix-recovers-late')).toBe(true);
+    expect(_pendingBackgroundRetryCount()).toBe(0);
+  });
+
+  it('respects the background retry ceiling and gives up permanently for a channel stuck failing', async () => {
+    const {
+      registerChannelAdapter,
+      initChannelAdapters,
+      getActiveAdapters,
+      _pendingBackgroundRetryCount,
+      _resetForTests,
+    } = await import('./channel-registry.js');
+    _resetForTests();
+    vi.useFakeTimers();
+
+    let calls = 0;
+    const adapter = createMockAdapter('matrix-always-502');
+    adapter.setup = vi.fn(async () => {
+      calls += 1;
+      const err = new Error('Server returned 502 error');
+      err.name = 'HTTPError';
+      throw err;
+    });
+
+    registerChannelAdapter('matrix', { factory: () => adapter });
+
+    const initPromise = initChannelAdapters(setupFn);
+    // In-window ladder (2s+5s+10s) + full background ladder
+    // (15s+30s+60s+120s+240s+300s) = 782s total; advance well past it.
+    await vi.advanceTimersByTimeAsync(800_000);
+    await initPromise;
+
+    // In-window ladder: 4 calls (1 initial + 3 retries), all fail.
+    // Background ladder: 6 more calls (one per BACKGROUND_RETRY_DELAYS_MS
+    // entry), all fail, then the ceiling is reached and it gives up.
+    expect(calls).toBe(10);
+    expect(getActiveAdapters().some((a) => a.channelType === 'matrix-always-502')).toBe(false);
+    expect(_pendingBackgroundRetryCount()).toBe(0);
+  });
+});

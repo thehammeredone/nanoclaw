@@ -288,3 +288,35 @@ Caddy retries indefinitely. Check in order:
 3. Check Windows Firewall isn't blocking 443.
 4. Check router port-forward rule is saved and active (some routers require a reboot).
 5. `docker compose logs caddy` — the error message is always specific about what failed.
+
+---
+
+## TASK-21 update (2026-08-23): transient adapter-setup failures no longer need a manual restart
+
+Background: on 2026-08-19 a host restart hit a transient `502` from the homeserver (Caddy/Synapse) during the Matrix adapter's `whoami` setup check. Because `initChannelAdapters()` in `src/channels/channel-registry.ts` only retried Chat SDK's own `NetworkError` type, the `HTTPError: Server returned 502 error` fell straight through and the Matrix adapter was never added to `activeAdapters` — every Matrix message was silently unroutable (`WARN No adapter for channel type channelType="matrix"`) until the host was restarted by hand.
+
+This is fixed. `channel-registry.ts` now classifies a broader set of errors as transient (`isTransientSetupError`: `NetworkError`, HTTP 5xx/429 read from several common error shapes including the `HTTPError: Server returned 502 error` message shape, timeout/connection-reset error codes, `AbortError`/`TimeoutError`) and retries on two levels:
+
+1. **In-window**: up to 3 retries during startup itself, at 2s/5s/10s.
+2. **Background**: if the in-window ladder is exhausted and the failure is still transient, up to 6 more attempts at 15s/30s/60s/120s/240s/300s (topping out at 5 minutes between tries, ~13 minutes of additional wall clock).
+
+What to expect in the logs now for a homeserver blip at startup:
+
+```
+WARN  Channel adapter setup failed with transient error, retrying   channel=matrix attempt=1 delayMs=2000 err="Server returned 502 error"
+WARN  Channel adapter setup failed with transient error, retrying   channel=matrix attempt=2 delayMs=5000 err="Server returned 502 error"
+WARN  Channel adapter setup failed with transient error, retrying   channel=matrix attempt=3 delayMs=10000 err="Server returned 502 error"
+ERROR Channel adapter setup exhausted in-window retries, scheduling background retry   channel=matrix err="Server returned 502 error"
+...
+INFO  Channel adapter recovered via background retry   channel=matrix type=matrix attempt=N
+```
+
+If the homeserver never comes back within the full ladder (~13 minutes total), nanoclaw gives up **permanently** for the rest of the process lifetime and logs:
+
+```
+ERROR Channel adapter background retry ceiling reached, giving up permanently   channel=matrix attempts=6
+```
+
+**That log line means a manual restart IS required** (`systemctl --user restart nanoclaw-v2-b3501fc6`) — nanoclaw will not re-attempt Matrix setup again on its own after the ceiling is hit. A bad token/config (401/403/etc.) still fails fast with no retry at all (`ERROR Failed to start channel adapter`) — check credentials first if you see that instead of the retry ladder.
+
+Also note: a `HTTPError`/`5xx`-shaped failure no longer requires touching this file's DNS/negative-cache troubleshooting section above — that section is for the host's own DNS resolution failing outright (`fetch failed`), which is also covered by the transient classifier (`ENOTFOUND`/`EAI_AGAIN`) and now retries automatically too.
