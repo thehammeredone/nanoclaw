@@ -132,7 +132,7 @@ account immediately with no dry-run:
 
 **Never call any of these unless Hammer explicitly asks you to.** (Marking a chore complete
 or checking one off is `update_chore` — that counts as a write, and he does ask for it
-routinely; just don't do it unasked.) They will execute immediately against your live account — always confirm with Hammer before calling any write tool.
+routinely; just don't do it unasked.)
 
 ## Never Report a Failure as an Empty Result
 
