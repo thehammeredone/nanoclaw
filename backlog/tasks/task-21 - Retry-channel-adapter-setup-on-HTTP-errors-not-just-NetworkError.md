@@ -1,9 +1,11 @@
 ---
 id: TASK-21
 title: 'Retry channel adapter setup on HTTP errors, not just NetworkError'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-20 03:41'
+updated_date: '2026-08-24 02:49'
 labels:
   - channels
   - reliability
