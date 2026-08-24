@@ -1,7 +1,7 @@
 ---
 id: TASK-21
 title: 'Retry channel adapter setup on HTTP errors, not just NetworkError'
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 03:41'
@@ -36,10 +36,16 @@ See also docs/runbooks/matrix-homeserver-resume.md, which documents this same ch
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Adapter setup retry in channel-registry.ts covers transient HTTP failures (e.g. 502/503 from the platform), not just NetworkError-typed errors
-- [ ] #2 A single transient error during adapter setup no longer permanently kills the channel for the rest of the process lifetime
-- [ ] #3 Decide and document a retry ceiling so a truly broken credential/config still fails fast rather than retrying forever
+- [x] #1 Adapter setup retry in channel-registry.ts covers transient HTTP failures (e.g. 502/503 from the platform), not just NetworkError-typed errors
+- [x] #2 A single transient error during adapter setup no longer permanently kills the channel for the rest of the process lifetime
+- [x] #3 Decide and document a retry ceiling so a truly broken credential/config still fails fast rather than retrying forever
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -60,3 +66,9 @@ Both the code and the status lookups walk the `err.cause` chain (depth-bounded a
 
 **Deferred to TASK-32** (Minor review findings, none blocking): `setup()` is re-invoked on the same adapter instance without an intervening `teardown()`, so a late-throwing attempt can orphan Chat SDK sync loops/listeners; 429 ignores `Retry-After`; the in-window ladder is serial and on the startup critical path (~17s per channel on a cold network); test-only exports land in `dist`.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Broaden channel-adapter setup retry beyond NetworkError: classify 5xx/429/timeout/DNS errors as transient (walking err.cause, where Node fetch actually puts the code), add a bounded background retry ladder so a transient blip no longer kills a channel for the process lifetime, and document the ~13min ceiling in code and the Matrix runbook. Teardown cancels in-flight retries. 8 new tests; 428/428 pass.
+<!-- SECTION:FINAL_SUMMARY:END -->
