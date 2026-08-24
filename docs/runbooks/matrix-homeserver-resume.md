@@ -291,16 +291,26 @@ Caddy retries indefinitely. Check in order:
 
 ---
 
-## TASK-21 update (2026-08-23): transient adapter-setup failures no longer need a manual restart
+## Adapter setup now retries transient failures (2026-08-23)
 
 Background: on 2026-08-19 a host restart hit a transient `502` from the homeserver (Caddy/Synapse) during the Matrix adapter's `whoami` setup check. Because `initChannelAdapters()` in `src/channels/channel-registry.ts` only retried Chat SDK's own `NetworkError` type, the `HTTPError: Server returned 502 error` fell straight through and the Matrix adapter was never added to `activeAdapters` — every Matrix message was silently unroutable (`WARN No adapter for channel type channelType="matrix"`) until the host was restarted by hand.
 
-This is fixed. `channel-registry.ts` now classifies a broader set of errors as transient (`isTransientSetupError`: `NetworkError`, HTTP 5xx/429 read from several common error shapes including the `HTTPError: Server returned 502 error` message shape, timeout/connection-reset error codes, `AbortError`/`TimeoutError`) and retries on two levels:
+This is fixed. `channel-registry.ts` now classifies a broader set of errors as transient (`isTransientSetupError`) and retries on two levels.
+
+**Treated as transient** (retried):
+
+- Chat SDK's `NetworkError`, and `AbortError` / `TimeoutError`.
+- HTTP 5xx and 429, read defensively from several error shapes — `status`, `statusCode`, `response.status`, `response.statusCode`, `httpStatus`, anywhere on the `err.cause` chain, and as a last resort sniffed out of the message text (both the Matrix `HTTPError: Server returned 502 error` shape and `got`'s `HTTPError: Response code 502 (Bad Gateway)` shape).
+- Connection/DNS error codes — `ETIMEDOUT`, `ECONNRESET`, `ECONNREFUSED`, `EAI_AGAIN`, `ENOTFOUND`, `EHOSTUNREACH`, `ENETUNREACH`. These are also read off the `err.cause` chain, which is where they actually live: Node's `fetch` rejects with a `TypeError: fetch failed` whose own `code` is `undefined` and whose `cause.code` holds the real one. That means the local-DNS negative-cache failure described earlier in this runbook is now retried automatically too.
+
+**Not transient** (fails fast, no retry): any other 4xx. A bad token or misconfigured homeserver URL should surface immediately rather than spend 13 minutes retrying.
+
+The two retry levels:
 
 1. **In-window**: up to 3 retries during startup itself, at 2s/5s/10s.
 2. **Background**: if the in-window ladder is exhausted and the failure is still transient, up to 6 more attempts at 15s/30s/60s/120s/240s/300s (topping out at 5 minutes between tries, ~13 minutes of additional wall clock).
 
-What to expect in the logs now for a homeserver blip at startup:
+What to expect in the logs for a homeserver blip at startup:
 
 ```
 WARN  Channel adapter setup failed with transient error, retrying   channel=matrix attempt=1 delayMs=2000 err="Server returned 502 error"
@@ -319,13 +329,7 @@ ERROR Channel adapter background retry ceiling reached, giving up permanently   
 
 **That log line means a manual restart IS required** (`systemctl --user restart nanoclaw-v2-b3501fc6`) — nanoclaw will not re-attempt Matrix setup again on its own after the ceiling is hit. A bad token/config (401/403/etc.) still fails fast with no retry at all (`ERROR Failed to start channel adapter`) — check credentials first if you see that instead of the retry ladder.
 
-Also note: a `HTTPError`/`5xx`-shaped failure no longer requires touching this file's DNS/negative-cache troubleshooting section above — that section is for the host's own DNS resolution failing outright (`fetch failed`), which is also covered by the transient classifier (`ENOTFOUND`/`EAI_AGAIN`) and now retries automatically too.
+Two details worth knowing if you are reading the code:
 
-### TASK-21 round 2 (2026-08-23): `fetch failed` DNS errors and a teardown race
-
-Code review on the first pass of TASK-21 found the DNS-retry claim above was not actually true yet, plus a shutdown/test-isolation bug in the same code path. Both are fixed now:
-
-1. **`fetch failed` was still not retried.** Node's `fetch` rejects with a `TypeError` whose top-level `code` is `undefined` — the real DNS code (`ENOTFOUND`, `EAI_AGAIN`, etc.) lives on `err.cause.code`. `isTransientSetupError` was only reading `err.code`, so on a cold-boot DNS failure (exactly the scenario this runbook's "local DNS negative-cache" section describes) the Matrix adapter would still fail fast with zero retries. `channel-registry.ts` now walks the `err.cause` chain (bounded depth, cycle-guarded) when looking for a transient code, so `fetch failed` → `cause.code: 'ENOTFOUND'` is now correctly retried on the same 2s/5s/10s → background ladder described above. The same cause-walk was added to the HTTP-status extraction, and the status-extraction was hardened to reject non-numeric `status` fields (e.g. `{status: 'ERR_BAD_RESPONSE', statusCode: 503}`) instead of accidentally treating them as "no status found," plus the message-sniff regex now also matches the `got` library's `HTTPError: Response code 502 (Bad Gateway)` shape.
-2. **`teardownChannelAdapters()` couldn't cancel an attempt already parked on `await adapter.setup(...)`.** It could clear pending timers, but if a setup call was mid-flight when teardown ran, that call could later resolve and repopulate `activeAdapters`, or fail and schedule a fresh background-retry timer — both into state that teardown had just cleared. This mattered beyond a real process shutdown: `teardownChannelAdapters()` doubles as the `afterEach` in a couple of unrelated test files, so a stray in-flight retry chain could bleed state across test files. Fixed with a cancellation-generation counter bumped by `teardownChannelAdapters()` (and `_resetForTests()`); every retry chain checks it immediately after each `adapter.setup()` call and bails out silently — no `activeAdapters` write, no new timer — if teardown ran while it was in flight.
-
-Also fixed in the same pass: on the *last* background attempt, the logs used to show "scheduling another attempt" immediately followed by "giving up permanently" for the same attempt — misleading if you're grepping for one or the other. The last-attempt failure now logs only the give-up line.
+- A retry chain that is still in flight when `teardownChannelAdapters()` runs is cancelled via a generation counter checked after every `adapter.setup()` call, so a late-resolving attempt can never repopulate `activeAdapters` after shutdown or schedule a new timer into cleared state.
+- Background retry timers are `unref()`ed, so a pending retry never holds the process open.
