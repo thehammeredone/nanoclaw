@@ -288,3 +288,48 @@ Caddy retries indefinitely. Check in order:
 3. Check Windows Firewall isn't blocking 443.
 4. Check router port-forward rule is saved and active (some routers require a reboot).
 5. `docker compose logs caddy` — the error message is always specific about what failed.
+
+---
+
+## Adapter setup now retries transient failures (2026-08-23)
+
+Background: on 2026-08-19 a host restart hit a transient `502` from the homeserver (Caddy/Synapse) during the Matrix adapter's `whoami` setup check. Because `initChannelAdapters()` in `src/channels/channel-registry.ts` only retried Chat SDK's own `NetworkError` type, the `HTTPError: Server returned 502 error` fell straight through and the Matrix adapter was never added to `activeAdapters` — every Matrix message was silently unroutable (`WARN No adapter for channel type channelType="matrix"`) until the host was restarted by hand.
+
+This is fixed. `channel-registry.ts` now classifies a broader set of errors as transient (`isTransientSetupError`) and retries on two levels.
+
+**Treated as transient** (retried):
+
+- Chat SDK's `NetworkError`, and `AbortError` / `TimeoutError`.
+- HTTP 5xx and 429, read defensively from several error shapes — `status`, `statusCode`, `response.status`, `response.statusCode`, `httpStatus`, anywhere on the `err.cause` chain, and as a last resort sniffed out of the message text (both the Matrix `HTTPError: Server returned 502 error` shape and `got`'s `HTTPError: Response code 502 (Bad Gateway)` shape).
+- Connection/DNS error codes — `ETIMEDOUT`, `ECONNRESET`, `ECONNREFUSED`, `EAI_AGAIN`, `ENOTFOUND`, `EHOSTUNREACH`, `ENETUNREACH`. These are also read off the `err.cause` chain, which is where they actually live: Node's `fetch` rejects with a `TypeError: fetch failed` whose own `code` is `undefined` and whose `cause.code` holds the real one. That means the local-DNS negative-cache failure described earlier in this runbook is now retried automatically too.
+
+**Not transient** (fails fast, no retry): any other 4xx. A bad token or misconfigured homeserver URL should surface immediately rather than spend 13 minutes retrying.
+
+The two retry levels:
+
+1. **In-window**: up to 3 retries during startup itself, at 2s/5s/10s.
+2. **Background**: if the in-window ladder is exhausted and the failure is still transient, up to 6 more attempts at 15s/30s/60s/120s/240s/300s (topping out at 5 minutes between tries, ~13 minutes of additional wall clock).
+
+What to expect in the logs for a homeserver blip at startup:
+
+```
+WARN  Channel adapter setup failed with transient error, retrying   channel=matrix attempt=1 delayMs=2000 err="Server returned 502 error"
+WARN  Channel adapter setup failed with transient error, retrying   channel=matrix attempt=2 delayMs=5000 err="Server returned 502 error"
+WARN  Channel adapter setup failed with transient error, retrying   channel=matrix attempt=3 delayMs=10000 err="Server returned 502 error"
+ERROR Channel adapter setup exhausted in-window retries, scheduling background retry   channel=matrix err="Server returned 502 error"
+...
+INFO  Channel adapter recovered via background retry   channel=matrix type=matrix attempt=N
+```
+
+If the homeserver never comes back within the full ladder (~13 minutes total), nanoclaw gives up **permanently** for the rest of the process lifetime and logs:
+
+```
+ERROR Channel adapter background retry ceiling reached, giving up permanently   channel=matrix attempts=6
+```
+
+**That log line means a manual restart IS required** (`systemctl --user restart nanoclaw-v2-b3501fc6`) — nanoclaw will not re-attempt Matrix setup again on its own after the ceiling is hit. A bad token/config (401/403/etc.) still fails fast with no retry at all (`ERROR Failed to start channel adapter`) — check credentials first if you see that instead of the retry ladder.
+
+Two details worth knowing if you are reading the code:
+
+- A retry chain that is still in flight when `teardownChannelAdapters()` runs is cancelled via a generation counter checked after every `adapter.setup()` call, so a late-resolving attempt can never repopulate `activeAdapters` after shutdown or schedule a new timer into cleared state.
+- Background retry timers are `unref()`ed, so a pending retry never holds the process open.
