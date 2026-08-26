@@ -1,7 +1,7 @@
 ---
 id: TASK-26
 title: Make the Skylight MCP bootstrap line a single source of truth
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 23:07'
@@ -128,3 +128,9 @@ a condition that only changes when someone edits a file in this repo.
 
 2026-08-26 orchestrator review gate: spec COMPLIANT (all 5 orchestrator-supplied ACs verified against the diff, not the report; reviewer independently reproduced all three drift modes). Code quality: CHANGES REQUESTED -> 3 Important + 6 Minor, all 9 fixed in one round (429bbb41, d77dc5fb) and independently delta-verified (no regressions). Notable: the reviewer found a trailing-backslash collapse bug the drift test structurally could not catch -- a wrapped line collapsed to an escaped space, injecting a spurious argv element; now guarded by a throw plus a bash -n -c assertion on the collapsed output. pnpm test 441 passed / 1 skipped (the live-DB check, now opt-in via SKYLIGHT_LIVE_DB_CHECK=1 so the default suite is hermetic again). No writes to data/v2.db at any point; the seeder was never run; Aurora's 06:00 job untouched.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Made scripts/skylight-mcp-bootstrap.sh the single version-controlled definition of the Skylight MCP bootstrap command. scripts/skylight-mcp-bootstrap.ts collapses it into the one-line 'bash -lc' argument (throwing on trailing backslashes and asserting bash -n -c validity rather than emitting a subtly-wrong line); scripts/setup-aurora-agent.ts derives its value from that instead of inlining a 1.5KB literal; the runbook points at the .sh rather than quoting it. scripts/skylight-mcp-bootstrap.test.ts fails on drift between the .sh, the seeder and the runbook, with an opt-in (SKYLIGHT_LIVE_DB_CHECK=1) assertion that the collapsed line still matches the live container_configs column. The three-copy hand-sync warning is now a mechanism. No writes to data/v2.db; the live value was already byte-identical.
+<!-- SECTION:FINAL_SUMMARY:END -->
