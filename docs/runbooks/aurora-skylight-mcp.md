@@ -41,16 +41,33 @@ The whole thing is one `bash -lc` string. `command` is `bash` and `args` is
 — a readable, commented, version-controlled shell script. `scripts/skylight-mcp-bootstrap.ts`
 strips its comments and collapses it to one line; `scripts/setup-aurora-agent.ts` stores that
 line in the DB column. To see exactly what is running, read that file — or print the collapsed
-form the seeder would write:
+form the seeder would write (the repo side of the comparison):
 
 ```bash
 cd /home/hammer/git/nanoclaw-v2
 pnpm exec tsx -e "import('./scripts/skylight-mcp-bootstrap.js').then(m => console.log(m.skylightBootstrapLine()))"
 ```
 
-`scripts/skylight-mcp-bootstrap.test.ts` (run by `pnpm test`) fails if the stored column and
-the script disagree, so the DB can no longer drift silently. To change the bootstrap: edit the
-`.sh`, re-run the seeder, restart the group.
+To read the **live** side — what is actually stored in `data/v2.db` right now, which can
+differ from the repo if someone live-patched it (see `matrix-homeserver-resume.md` for a real
+example via `ncl groups config add-mcp-server`) — query the column directly (read-only, safe
+to run any time):
+
+```bash
+pnpm exec tsx scripts/q.ts data/v2.db \
+  "SELECT json_extract(mcp_servers,'\$.skylight.args[1]') FROM container_configs WHERE agent_group_id='ag-1782273071167-th1q6f'"
+```
+
+`scripts/skylight-mcp-bootstrap.test.ts` (run by `pnpm test`) checks repo-internal drift
+(`.sh` ↔ seeder ↔ this runbook) by default. It also has a **live-DB** comparison of the two
+commands above, gated behind an opt-in env flag so the default `pnpm test` stays hermetic and
+doesn't go red because of an unrelated live-patch:
+
+```bash
+SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts
+```
+
+To change the bootstrap: edit the `.sh`, re-run the seeder, restart the group.
 
 The Skylight credentials are *not* in that line — they are separate keys (`SKYLIGHT_EMAIL`,
 `SKYLIGHT_PASSWORD`, `SKYLIGHT_FRAME_ID`) on the sibling `env` object, which is deliberately
@@ -280,14 +297,37 @@ make build                           # -> dist/skylight-0.2.3-py3-none-any.whl
 ```
 
 Then point Aurora at it. Bump `VER=` in the canonical script and re-run the seeder — it
-re-reads the credentials from `~/.config/skylight/`, so you never handle the password:
+re-reads the credentials from `~/.config/skylight/`, so you never handle the password.
+
+**Before bumping `VER=`, confirm the dotfiles still match the live row.** The seeder rebuilds
+the whole `env` object from `~/.config/skylight/{config,credentials}.env` (`readSkylightEnv()`
+in `scripts/setup-aurora-agent.ts`), and that read happens *after* you've already edited the
+`.sh` below. If those dotfiles are missing, the seeder throws mid-procedure and leaves the
+repo half-bumped; if they're present but hold *different* values than the live DB row
+(rotated password, changed frame id), the seeder silently overwrites the live row with the
+stale dotfile values — there is no diff or confirmation step. Check both before touching
+`VER=`:
+
+```bash
+# Dotfiles present and readable?
+cat ~/.config/skylight/config.env ~/.config/skylight/credentials.env >/dev/null
+
+# Do they match what's actually live? (only the frame id is safe to print in the clear —
+# never paste SKYLIGHT_EMAIL/SKYLIGHT_PASSWORD into a doc, commit message, or chat)
+grep SKYLIGHT_FRAME_ID ~/.config/skylight/config.env
+pnpm exec tsx scripts/q.ts data/v2.db \
+  "SELECT json_extract(mcp_servers,'\$.skylight.env.SKYLIGHT_FRAME_ID') FROM container_configs WHERE agent_group_id='ag-1782273071167-th1q6f'"
+```
+
+If those two frame ids disagree, stop and reconcile before proceeding — the wheel bump is
+about to also silently re-write the email/password to whatever is in the dotfiles.
 
 ```bash
 cd /home/hammer/git/nanoclaw-v2
 sed -i 's/^VER=0.2.2;$/VER=0.2.3;/' scripts/skylight-mcp-bootstrap.sh
-pnpm test scripts/skylight-mcp-bootstrap.test.ts   # red until the seeder runs — that is the point
-pnpm exec tsx scripts/setup-aurora-agent.ts        # rewrites mcp_servers from the script
-pnpm test scripts/skylight-mcp-bootstrap.test.ts   # green: DB and script agree again
+SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts   # red until the seeder runs — that is the point
+pnpm exec tsx scripts/setup-aurora-agent.ts                                # rewrites mcp_servers from the script
+SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts   # green: DB and script agree again
 ncl groups restart --id ag-1782273071167-th1q6f --message "Verify the Skylight MCP works: call authenticate, then list today's chores."
 ```
 

@@ -8,8 +8,10 @@
  *
  * The container cannot read this repo (only the read-only Skylight source is
  * mounted, and the venv is per-session under /workspace), so the line has to
- * be inlined in the DB. `skylight-mcp-bootstrap.test.ts` fails if the stored
- * line and the script diverge.
+ * be inlined in the DB. `skylight-mcp-bootstrap.test.ts` checks the stored
+ * line against the script, but only when run with SKYLIGHT_LIVE_DB_CHECK=1
+ * (see docs/runbooks/aurora-skylight-mcp.md) — the default `pnpm test` is
+ * hermetic and doesn't touch data/v2.db.
  */
 import { spawnSync } from 'child_process';
 import fs from 'fs';

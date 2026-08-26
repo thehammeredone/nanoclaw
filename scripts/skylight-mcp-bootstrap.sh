@@ -12,14 +12,23 @@
 # /workspace/extra/skylight is the Skylight source, mounted READ-ONLY, and the
 # venv is per-session under /workspace.
 #
-# `scripts/skylight-mcp-bootstrap.test.ts` fails if the stored line and this
-# file disagree. Change this file, re-run the seeder, restart the group.
+# `scripts/skylight-mcp-bootstrap.test.ts` checks the stored DB line against
+# this file, but only when run with SKYLIGHT_LIVE_DB_CHECK=1 (see
+# docs/runbooks/aurora-skylight-mcp.md) — the default `pnpm test` is hermetic
+# and only checks that this file, the seeder, and the runbook agree with each
+# other, not the live DB. Change this file, re-run the seeder, restart the
+# group.
 #
-# Constraints this file must respect (the loader enforces the first two):
+# Constraints this file must respect (the loader enforces the first three):
 #   - No `#` outside the leading comment block, and no inline comments: after
 #     the collapse a `#` would comment out the rest of the single line.
-#   - No runs of two or more spaces, and no line breaks inside a quoted
-#     string — both would change the collapsed result.
+#   - No runs of two or more spaces — the collapse changes on any run of them.
+#   - No line ending in a trailing `\` line-continuation: joining it to the
+#     next line with a plain space turns the backslash into a spurious
+#     escaped-space argv element that was never in the source.
+#   - No line breaks inside a quoted string (the loader does NOT check this
+#     one — a multi-line quoted string collapses newline-to-space silently,
+#     changing the value without erroring). Keep quoted strings on one line.
 #   - Every statement ends in `;` so the collapsed one-liner still parses.
 #
 # Background: docs/runbooks/aurora-skylight-mcp.md.

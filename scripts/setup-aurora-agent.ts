@@ -162,7 +162,8 @@ function main(): void {
         // Canonical definition: scripts/skylight-mcp-bootstrap.sh (single source of
         // truth, with the full rationale). This column is only a materialized copy —
         // the container cannot read this repo, so the line has to be inlined here.
-        // scripts/skylight-mcp-bootstrap.test.ts fails if the two diverge.
+        // scripts/skylight-mcp-bootstrap.test.ts checks this against the .sh, but only
+        // with SKYLIGHT_LIVE_DB_CHECK=1 (see docs/runbooks/aurora-skylight-mcp.md).
         skylightBootstrapLine(),
       ],
       env: {
