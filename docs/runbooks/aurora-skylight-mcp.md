@@ -11,6 +11,7 @@ Aurora report that comes back wrong or empty.
 | Agent instructions | `groups/skylight-morning/CLAUDE.local.md` (`CLAUDE.md` is composed at spawn — don't edit it) |
 | MCP server source | `/home/hammer/git/Skylight` (separate repo, branch `main`) |
 | MCP server config | `container_configs.mcp_servers` in `data/v2.db`, key `skylight` |
+| Bootstrap command (source of truth) | `scripts/skylight-mcp-bootstrap.sh` — the DB column is a materialized copy |
 | Wheel consumed by the container | `/home/hammer/git/Skylight/dist/skylight-<version>-py3-none-any.whl` |
 | Skylight repo docs | `docs/auth.md`, `docs/mcp/client-setup.md` |
 
@@ -31,35 +32,47 @@ There is no image layer for it. The whole thing is bootstrapped at MCP-launch ti
    `exec …/bin/python -m server`.
 
 The whole thing is one `bash -lc` string. `command` is `bash` and `args` is
-`["-lc", "<the line below>"]`. The Skylight credentials are *not* in that line — they are
-separate keys (`SKYLIGHT_EMAIL`, `SKYLIGHT_PASSWORD`, `SKYLIGHT_FRAME_ID`) on the sibling
-`env` object, which is deliberately not reproduced here. Never paste those values into a
-doc, a commit message, or a chat.
+`["-lc", "<the line>"]`.
+
+**The line is not written by hand and is not quoted here.** Its single source of truth is
+
+> **[`scripts/skylight-mcp-bootstrap.sh`](../../scripts/skylight-mcp-bootstrap.sh)**
+
+— a readable, commented, version-controlled shell script. `scripts/skylight-mcp-bootstrap.ts`
+strips its comments and collapses it to one line; `scripts/setup-aurora-agent.ts` stores that
+line in the DB column. To see exactly what is running, read that file — or print the collapsed
+form the seeder would write (the repo side of the comparison):
 
 ```bash
-set -u; VER=0.2.3; V=/workspace/.skylight-venv-$VER;
-W=/workspace/extra/skylight/dist/skylight-$VER-py3-none-any.whl;
-fail() { echo "skylight-mcp: PROVISIONING FAILED ($1). venv=$V wheel=$W. Refusing to start the server -- launching it now would surface as a misleading ModuleNotFoundError. The incomplete venv has no sentinel and will be rebuilt from scratch on the next launch; to force that now, rm -rf $V. See docs/runbooks/aurora-skylight-mcp.md." >&2; exit 1; };
-die() { echo "skylight-mcp: STARTUP FAILED ($1). The venv at $V is provisioned and healthy -- this is not a provisioning problem, so do NOT delete it. The usual cause is a missing or misconfigured mount: /workspace/extra/skylight comes from container_configs.additional_mounts. See docs/runbooks/aurora-skylight-mcp.md." >&2; exit 1; };
-if [ ! -f "$V/.provisioned" ]; then
-  echo "skylight-mcp: provisioning $V from $W" >&2;
-  rm -f "$V/.provisioned"         || fail "could not invalidate stale sentinel";
-  rm -rf "$V"                     || fail "could not remove stale venv";
-  python3 -m venv "$V" >&2        || fail "python3 -m venv failed";
-  "$V/bin/pip" install "$W" >&2   || fail "pip install failed";
-  ( cd /workspace/extra/skylight && "$V/bin/python" -c "import server.app" ) >&2 || fail "post-install import check failed - venv is missing dependencies";
-  : > "$V/.provisioned"           || fail "could not write sentinel";
-  echo "skylight-mcp: provisioned OK" >&2;
-fi;
-mkdir -p /workspace/.skylight || die "mkdir /workspace/.skylight failed";
-cd /workspace/extra/skylight || die "cd /workspace/extra/skylight failed";
-exec "$V/bin/python" -m server
+cd /home/hammer/git/nanoclaw-v2
+pnpm exec tsx -e "import('./scripts/skylight-mcp-bootstrap.js').then(m => console.log(m.skylightBootstrapLine()))"
 ```
 
-(The stored value is a single line; it is broken up here only to be readable. The
-version-controlled seeder in `scripts/setup-aurora-agent.ts` assembles the same string,
-including the same `VER=`, and re-running the seeder overwrites the DB column with it. The
-two are kept in sync by hand — see the last bullet of "Known rough edges".)
+To read the **live** side — what is actually stored in `data/v2.db` right now, which can
+differ from the repo if someone live-patched it (see `matrix-homeserver-resume.md` for a real
+example via `ncl groups config add-mcp-server`) — query the column directly (read-only, safe
+to run any time):
+
+```bash
+pnpm exec tsx scripts/q.ts data/v2.db \
+  "SELECT json_extract(mcp_servers,'\$.skylight.args[1]') FROM container_configs WHERE agent_group_id='ag-1782273071167-th1q6f'"
+```
+
+`scripts/skylight-mcp-bootstrap.test.ts` (run by `pnpm test`) checks repo-internal drift
+(`.sh` ↔ seeder ↔ this runbook) by default. It also has a **live-DB** comparison of the two
+commands above, gated behind an opt-in env flag so the default `pnpm test` stays hermetic and
+doesn't go red because of an unrelated live-patch:
+
+```bash
+SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts
+```
+
+To change the bootstrap: edit the `.sh`, re-run the seeder, restart the group.
+
+The Skylight credentials are *not* in that line — they are separate keys (`SKYLIGHT_EMAIL`,
+`SKYLIGHT_PASSWORD`, `SKYLIGHT_FRAME_ID`) on the sibling `env` object, which is deliberately
+not reproduced here or in the script. Never paste those values into a doc, a commit message,
+or a chat.
 
 **Consequences worth knowing:**
 
@@ -283,15 +296,44 @@ make lint && make test-server        # test-tools has 5 pre-existing failures
 make build                           # -> dist/skylight-0.2.3-py3-none-any.whl
 ```
 
-Then point Aurora at it. The password lives in the JSON you're editing, so mutate it in
-place rather than retyping the whole object:
+Then point Aurora at it. Bump `VER=` in the canonical script and re-run the seeder — it
+re-reads the credentials from `~/.config/skylight/`, so you never handle the password.
+
+**Before bumping `VER=`, confirm the dotfiles still match the live row.** The seeder rebuilds
+the whole `env` object from `~/.config/skylight/{config,credentials}.env` (`readSkylightEnv()`
+in `scripts/setup-aurora-agent.ts`), and that read happens *after* you've already edited the
+`.sh` below. If those dotfiles are missing, the seeder throws mid-procedure and leaves the
+repo half-bumped; if they're present but hold *different* values than the live DB row
+(rotated password, changed frame id), the seeder silently overwrites the live row with the
+stale dotfile values — there is no diff or confirmation step. Check both before touching
+`VER=`:
+
+```bash
+# Dotfiles present and readable?
+cat ~/.config/skylight/config.env ~/.config/skylight/credentials.env >/dev/null
+
+# Do they match what's actually live? (only the frame id is safe to print in the clear —
+# never paste SKYLIGHT_EMAIL/SKYLIGHT_PASSWORD into a doc, commit message, or chat)
+grep SKYLIGHT_FRAME_ID ~/.config/skylight/config.env
+pnpm exec tsx scripts/q.ts data/v2.db \
+  "SELECT json_extract(mcp_servers,'\$.skylight.env.SKYLIGHT_FRAME_ID') FROM container_configs WHERE agent_group_id='ag-1782273071167-th1q6f'"
+```
+
+If those two frame ids disagree, stop and reconcile before proceeding — the wheel bump is
+about to also silently re-write the email/password to whatever is in the dotfiles.
 
 ```bash
 cd /home/hammer/git/nanoclaw-v2
-# read mcp_servers, replace the single `VER=<old>` assignment in args[1], write back
-# via updateContainerConfigJson(group, 'mcp_servers', …) — see src/db/container-configs.ts
+sed -i 's/^VER=0.2.2;$/VER=0.2.3;/' scripts/skylight-mcp-bootstrap.sh
+SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts   # red until the seeder runs — that is the point
+pnpm exec tsx scripts/setup-aurora-agent.ts                                # rewrites mcp_servers from the script
+SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts   # green: DB and script agree again
 ncl groups restart --id ag-1782273071167-th1q6f --message "Verify the Skylight MCP works: call authenticate, then list today's chores."
 ```
+
+The seeder overwrites the whole `mcp_servers` object, not just `args[1]` — if you have
+hand-tuned anything else on that row (an extra `env` key, say), mirror it into the seeder
+first or it is lost. See TASK-27.
 
 No `--rebuild` needed — the wheel is installed at MCP launch, not baked into the image.
 
@@ -337,12 +379,11 @@ broken one.
   a `.skylight-venv-<version>` per version ever used. Clean up by hand after a bump — the
   bootstrap only ever touches the directory for the version it is currently pinned to, so
   older ones sit there untouched (and without sentinels) forever.
-- **The bootstrap line lives in a DB column, not in version control.** `container_configs
-  .mcp_servers` is the authoritative copy; `scripts/setup-aurora-agent.ts` holds a
-  version-controlled *seeder* copy of the same logic, and the two have to be kept in sync by
-  hand. Anyone auditing the repo sees the seeder, not what is actually running. The seeder is
-  idempotent in the sense that re-running it is *safe*, not that it is a no-op: it overwrites
-  `mcp_servers` unconditionally, so if its `VER=` has drifted behind the DB's, re-running it
-  silently downgrades Aurora to an older wheel. Sync the seeder before running it, and check
-  the block quoted above against the DB after. This third copy — the quoted block in this
-  runbook — is kept byte-identical to the other two as well.
+- **The bootstrap line still has to be *copied* into a DB column.** `container_configs
+  .mcp_servers` is what actually runs, and the container cannot read this repo, so the line is
+  materialized into `data/v2.db` rather than referenced from it. Since TASK-26 that copy has a
+  single version-controlled source (`scripts/skylight-mcp-bootstrap.sh`) and a test that fails
+  on divergence, but nothing *re-*materializes it: after editing the `.sh` you must re-run
+  `pnpm exec tsx scripts/setup-aurora-agent.ts` and restart the group, or the test will (loudly)
+  stay red. Note the seeder overwrites `mcp_servers` unconditionally — it is safe to re-run, not
+  a no-op.

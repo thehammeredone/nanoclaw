@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-20 23:07'
+updated_date: '2026-08-26 18:54'
 labels:
   - aurora
   - skylight
@@ -31,3 +32,12 @@ The general defect: a 'safe to re-run' seeder that clobbers hand-tuned live stat
 
 Related: the three-way duplication task filed alongside this one.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-08-26 (orchestrator, task-26 merge): regressions #1 and #2 in this description are now CLOSED by task-26.
+- #2 (version downgrade): the VER literal now exists in exactly one version-controlled place, scripts/skylight-mcp-bootstrap.sh, and scripts/skylight-mcp-bootstrap.test.ts fails on drift between it, the seeder, and the runbook. The two-files-with-a-literal condition no longer exists.
+- #1 (env key loss): PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH was added to the seeder's env in task-26, because task-26's new runbook procedure instructs operators to re-run the seeder. Verified at that time that the live skylight.env is exactly the six keys the seeder now writes, with matching values -- so a re-run is a no-op today.
+The GENERAL defect this task is actually about is UNCHANGED and still open: updateContainerConfigJson(ag.id, 'mcp_servers', ...) is still an unconditional wholesale overwrite. It should merge, require --force against an already-configured group, or diff-and-confirm. #1 was patched by hand, not mechanised -- the next key someone tunes live will be dropped the same way.
+<!-- SECTION:NOTES:END -->
