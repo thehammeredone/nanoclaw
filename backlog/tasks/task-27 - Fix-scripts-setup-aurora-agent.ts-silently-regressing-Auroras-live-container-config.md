@@ -3,8 +3,9 @@ id: TASK-27
 title: >-
   Fix scripts/setup-aurora-agent.ts silently regressing Aurora's live container
   config
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-20 23:07'
 updated_date: '2026-08-26 18:54'
 labels:
