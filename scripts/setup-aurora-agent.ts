@@ -5,11 +5,30 @@
  * Credentials (email + password) come from ~/.config/skylight/credentials.env;
  * the token is never a static env var — Aurora calls `authenticate` on 401.
  *
- * Idempotent — safe to run multiple times. Logs "Created" vs "Reusing" for
- * the agent group row.
+ * Idempotent — safe to run multiple times for the agent group row, group
+ * filesystem, packages_apt, and additional_mounts (all no-op or additive on
+ * re-run). `mcp_servers` is the exception: it is a wholesale JSON-column
+ * overwrite (see updateContainerConfigJson), so a naive re-run can silently
+ * discard hand-tuned live state (TASK-27 — this happened for real with
+ * PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH). That write is therefore gated by
+ * scripts/mcp-servers-guard.ts: diff-and-confirm by default, --force to
+ * skip the prompt, --dry-run to preview without writing. See that file's
+ * header comment for the full rationale.
  *
  * Usage:
- *   pnpm exec tsx scripts/setup-aurora-agent.ts
+ *   pnpm exec tsx scripts/setup-aurora-agent.ts [--force] [--dry-run]
+ *
+ * Flags:
+ *   --force     Skip the confirmation prompt; overwrite mcp_servers even if
+ *               the stored value diverges from what this run would write.
+ *   --dry-run   Print the mcp_servers diff (if any) and exit without
+ *               writing it. Other steps (packages_apt, mount, filesystem
+ *               scaffold) still run — they carry no hand-tuned state today.
+ *
+ * Exit codes:
+ *   0  completed (including a clean --dry-run)
+ *   1  refused to overwrite a divergent mcp_servers without --force
+ *      (non-interactive), or the operator declined the confirmation prompt
  */
 import fs from 'fs';
 import os from 'os';
@@ -21,8 +40,24 @@ import { ensureContainerConfig, updateContainerConfigJson } from '../src/db/cont
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { initGroupFilesystem } from '../src/group-init.js';
+import { confirmOverwrite, getStoredMcpServers, planMcpServersUpdate, writeMcpServers } from './mcp-servers-guard.js';
 import { skylightBootstrapLine } from './skylight-mcp-bootstrap.js';
 import type { AgentGroup } from '../src/types.js';
+
+function parseArgs(argv: string[]): { force: boolean; dryRun: boolean } {
+  let force = false;
+  let dryRun = false;
+  for (const a of argv) {
+    if (a === '--force') force = true;
+    else if (a === '--dry-run') dryRun = true;
+    else {
+      console.error(`Unknown argument: ${a}`);
+      console.error('usage: pnpm exec tsx scripts/setup-aurora-agent.ts [--force] [--dry-run]');
+      process.exit(1);
+    }
+  }
+  return { force, dryRun };
+}
 
 const FOLDER = 'skylight-morning';
 const NAME = 'Aurora';
@@ -98,7 +133,8 @@ function ensureSkylightMountAllowlisted(): void {
 const PLACEHOLDER_INSTRUCTIONS =
   '# Aurora\n\nYou are Aurora, a morning briefing assistant for Hammer. Full instructions coming in Task 2.\n';
 
-function main(): void {
+async function main(): Promise<void> {
+  const { force, dryRun } = parseArgs(process.argv.slice(2));
   const db = initDb(path.join(DATA_DIR, 'v2.db'));
   runMigrations(db); // idempotent
 
@@ -154,7 +190,8 @@ function main(): void {
 
   // 3c. MCP server: install wheel into a versioned venv, pass credentials as env vars.
   //     Token is never a static env var — Aurora calls `authenticate` on 401.
-  updateContainerConfigJson(ag.id, 'mcp_servers', {
+  //     This write is gated (TASK-27) — see scripts/mcp-servers-guard.ts.
+  const nextMcpServers = {
     skylight: {
       command: 'bash',
       args: [
@@ -183,8 +220,43 @@ function main(): void {
         PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: '/usr/bin/chromium',
       },
     },
-  });
-  console.log('Skylight MCP server configured (python venv + email/password env vars).');
+  };
+
+  const existingMcpServers = getStoredMcpServers(db, ag.id);
+  const plan = planMcpServersUpdate({ existing: existingMcpServers, next: nextMcpServers, force, dryRun });
+
+  switch (plan.kind) {
+    case 'write':
+      writeMcpServers(db, ag.id, nextMcpServers);
+      console.log(`Skylight MCP server configured (python venv + email/password env vars; reason: ${plan.reason}).`);
+      break;
+    case 'dry-run':
+      console.log(`[dry-run] mcp_servers not written (${plan.reason}).`);
+      console.log(plan.diff);
+      console.log('[dry-run] exiting without writing mcp_servers. Re-run with --force to apply, or without --dry-run to confirm interactively.');
+      return;
+    case 'needs-confirmation':
+      if (process.stdin.isTTY) {
+        const confirmed = await confirmOverwrite(plan.diff);
+        if (!confirmed) {
+          console.error('Aborted: mcp_servers left unchanged. Re-run with --force to overwrite without prompting.');
+          process.exitCode = 1;
+          return;
+        }
+        writeMcpServers(db, ag.id, nextMcpServers);
+        console.log('Skylight MCP server configured (operator confirmed overwrite).');
+      } else {
+        console.error(
+          'Refusing to overwrite stored mcp_servers: it differs from what this seeder would write, and ' +
+            'stdin is not a TTY (non-interactive-safe refusal). Pass --force to overwrite anyway, or ' +
+            '--dry-run to inspect the diff without writing.',
+        );
+        console.error(plan.diff);
+        process.exitCode = 1;
+        return;
+      }
+      break;
+  }
 
   console.log('');
   console.log('Aurora agent group setup complete.');
@@ -198,4 +270,7 @@ function main(): void {
   console.log('  - Wire a messaging group when ready to test');
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
