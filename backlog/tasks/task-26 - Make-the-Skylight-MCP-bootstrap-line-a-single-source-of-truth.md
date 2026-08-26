@@ -1,9 +1,11 @@
 ---
 id: TASK-26
 title: Make the Skylight MCP bootstrap line a single source of truth
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-20 23:07'
+updated_date: '2026-08-26 18:23'
 labels:
   - aurora
   - skylight
