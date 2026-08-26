@@ -11,6 +11,7 @@ Aurora report that comes back wrong or empty.
 | Agent instructions | `groups/skylight-morning/CLAUDE.local.md` (`CLAUDE.md` is composed at spawn — don't edit it) |
 | MCP server source | `/home/hammer/git/Skylight` (separate repo, branch `main`) |
 | MCP server config | `container_configs.mcp_servers` in `data/v2.db`, key `skylight` |
+| Bootstrap command (source of truth) | `scripts/skylight-mcp-bootstrap.sh` — the DB column is a materialized copy |
 | Wheel consumed by the container | `/home/hammer/git/Skylight/dist/skylight-<version>-py3-none-any.whl` |
 | Skylight repo docs | `docs/auth.md`, `docs/mcp/client-setup.md` |
 
@@ -278,15 +279,21 @@ make lint && make test-server        # test-tools has 5 pre-existing failures
 make build                           # -> dist/skylight-0.2.3-py3-none-any.whl
 ```
 
-Then point Aurora at it. The password lives in the JSON you're editing, so mutate it in
-place rather than retyping the whole object:
+Then point Aurora at it. Bump `VER=` in the canonical script and re-run the seeder — it
+re-reads the credentials from `~/.config/skylight/`, so you never handle the password:
 
 ```bash
 cd /home/hammer/git/nanoclaw-v2
-# read mcp_servers, replace the single `VER=<old>` assignment in args[1], write back
-# via updateContainerConfigJson(group, 'mcp_servers', …) — see src/db/container-configs.ts
+sed -i 's/^VER=0.2.2;$/VER=0.2.3;/' scripts/skylight-mcp-bootstrap.sh
+pnpm test scripts/skylight-mcp-bootstrap.test.ts   # red until the seeder runs — that is the point
+pnpm exec tsx scripts/setup-aurora-agent.ts        # rewrites mcp_servers from the script
+pnpm test scripts/skylight-mcp-bootstrap.test.ts   # green: DB and script agree again
 ncl groups restart --id ag-1782273071167-th1q6f --message "Verify the Skylight MCP works: call authenticate, then list today's chores."
 ```
+
+The seeder overwrites the whole `mcp_servers` object, not just `args[1]` — if you have
+hand-tuned anything else on that row (an extra `env` key, say), mirror it into the seeder
+first or it is lost. See TASK-27.
 
 No `--rebuild` needed — the wheel is installed at MCP launch, not baked into the image.
 
