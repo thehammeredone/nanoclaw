@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 23:07'
-updated_date: '2026-08-26 18:31'
+updated_date: '2026-08-26 18:54'
 labels:
   - aurora
   - skylight
@@ -125,4 +125,6 @@ a condition that only changes when someone edits a file in this repo.
 ### Commits (branch task-26-...)
 - 876a2a3d task-26: single source of truth for the Skylight MCP bootstrap line
 - f0de2fd7 task-26: point the runbook's wheel-bump procedure at the canonical script
+
+2026-08-26 orchestrator review gate: spec COMPLIANT (all 5 orchestrator-supplied ACs verified against the diff, not the report; reviewer independently reproduced all three drift modes). Code quality: CHANGES REQUESTED -> 3 Important + 6 Minor, all 9 fixed in one round (429bbb41, d77dc5fb) and independently delta-verified (no regressions). Notable: the reviewer found a trailing-backslash collapse bug the drift test structurally could not catch -- a wrapped line collapsed to an escaped space, injecting a spurious argv element; now guarded by a throw plus a bash -n -c assertion on the collapsed output. pnpm test 441 passed / 1 skipped (the live-DB check, now opt-in via SKYLIGHT_LIVE_DB_CHECK=1 so the default suite is hermetic again). No writes to data/v2.db at any point; the seeder was never run; Aurora's 06:00 job untouched.
 <!-- SECTION:NOTES:END -->
