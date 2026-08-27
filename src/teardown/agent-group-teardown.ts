@@ -58,18 +58,27 @@
  *    well-formed-but-unexpected value (a bare array, a scalar, `null`,
  *    `{"data":{}}`), and an exec failure are all treated the same way, because
  *    each reaches the same dangerous end state behind exit 0: a live vault
- *    agent reported as `(none)`. `findImageTags` and `findContainers` have no
- *    JSON to shape-check (their output is plain `--format` text), but they
- *    share the same underlying risk one level down: a runtime that ignores
- *    `--format` and exits 0 with a human-readable table instead. Every table
- *    line then fails the exact-tag-membership check (`findImageTags`) or the
- *    `^nanoclaw-v2-<folder>-\d+$` regex (`findContainers`), which is
+ *    agent reported as `(none)`. `findImageTags` and `findContainers` share
+ *    the same underlying risk one level down: a runtime that ignores
+ *    `--format` and exits 0 with something else entirely — a human-readable
+ *    table, OR (TASK-30 round 2) compact JSON, which is at least as likely a
+ *    fallback shape: `origin/skill/apple-container` rewrites orphan cleanup
+ *    to `container ls --format json` + `JSON.parse`, i.e. that runtime's
+ *    `--format` flag takes `json|table`, not a Go template. Every line of
+ *    either shape then fails the exact-tag-membership check (`findImageTags`)
+ *    or the `^nanoclaw-v2-<folder>-\d+$` regex (`findContainers`), which is
  *    indistinguishable from "checked, nothing found" — the same silent-(none)-
  *    behind-exit-0 shape as the onecli case, reached through a malformed
- *    *shape* instead of a parse exception (TASK-30). Both filters guard
- *    against it with `looksLikeTableRow`, an output-form sanity check applied
- *    before the match/membership step — see their docstrings for why a
- *    capability probe was not used instead.
+ *    *shape* instead of a parse exception. A negative check keyed on internal
+ *    whitespace (the round-1 fix) only catches the table shape — compact JSON
+ *    and an unpadded single-column header are both whitespace-free and sail
+ *    straight through it. Both filters instead validate the POSITIVE shape a
+ *    valid line must have — `CONTAINER_NAME_RE` / `IMAGE_REF_RE`, applied via
+ *    the shared `splitTemplateLines` — before the match/membership step; any
+ *    line that fails is treated exactly like a discovery failure
+ *    (`unknown: true`), never filtered out or merely logged. See their
+ *    docstrings for why an output-form sanity check was used instead of a
+ *    runtime capability probe.
  *
  * See `docs/runbooks/agent-group-teardown.md` for the operator-facing runbook
  * and the full deletion order with FK evidence.
@@ -528,32 +537,43 @@ export function findOrphans(
 // ---------------------------------------------------------------------------
 
 /**
- * True when a line requested via a Go `--format` template looks like it came
- * from a human-readable table instead — e.g. because the runtime silently
- * ignored `--format` and exited 0 anyway (TASK-30). Every template we request
- * here (`{{.Names}}`, `{{.Repository}}:{{.Tag}}`) resolves to a single
- * whitespace-free token per line — container names and image references are
- * both restricted to `[a-zA-Z0-9_.:-]`-shaped strings by the runtimes
- * themselves. A table row or header, by contrast, is column-padded and always
- * contains internal whitespace. This is an output-form sanity check rather
- * than a runtime capability probe: a probe would add a round-trip to every
- * teardown and could itself be misreported by the same misbehaving runtime,
- * whereas this reuses the exact bytes we already fetched. Callers must filter
- * blank lines out before calling this — an empty line is not garbage, it is
- * either a separator or genuinely-empty output, and must not be flagged.
+ * Split `--format` stdout into trimmed, non-blank lines. `.trim()` strips a
+ * trailing `\r` too, so CRLF output from a Windows-flavoured runtime is
+ * handled the same as `\n`. Shared by `findContainers` and `findImageTags` so
+ * the split/trim/blank-filter step can never drift out of lockstep between
+ * them — the per-call-site shape check that runs over the result stays
+ * distinct (see `CONTAINER_NAME_RE` / `IMAGE_REF_RE`), because container
+ * names and image references are not the same shape.
  */
-function looksLikeTableRow(line: string): boolean {
-  return /\s/.test(line);
+function splitTemplateLines(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
+
+/**
+ * Shape of a single `{{.Names}}` token: starts with an alphanumeric,
+ * followed by alphanumeric, `.`, `_`, `/`, `@`, or `-`.
+ */
+const CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._/@-]*$/;
+
+/**
+ * Shape of a single `{{.Repository}}:{{.Tag}}` token: two `:`-free,
+ * whitespace-free segments (registry paths may add `/`-separated
+ * components) joined by exactly one `:`. Passes `<none>:<none>` and
+ * registry-qualified refs (`ghcr.io/org/img:tag`).
+ */
+const IMAGE_REF_RE = /^[^\s:]+(?:\/[^\s:]+)*:[^\s:]+$/;
 
 /**
  * Running container names belonging to this group. `nanoclaw-v2-<folder>-<ts>`.
  *
  * `unknown: true` means discovery did not run — no folder to match against,
- * the runtime binary failed, OR it exited 0 with output that does not look
- * like the requested `--format` template (a table row/header instead of a
- * bare name — see `looksLikeTableRow`). It must never be presented as
- * "nothing running".
+ * the runtime binary failed, OR it exited 0 with a line that does not match
+ * the container-name token shape (`CONTAINER_NAME_RE`) — a table row/header,
+ * compact JSON, or anything else instead of a bare name. It must never be
+ * presented as "nothing running".
  */
 export function findContainers(
   env: TeardownEnv,
@@ -583,19 +603,17 @@ export function findContainers(
       warnings: [`${CONTAINER_RUNTIME_BIN} ps failed: ${res.stderr.trim() || 'unknown error'}`],
     };
   }
-  const lines = res.stdout
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const garbage = lines.find(looksLikeTableRow);
+  const lines = splitTemplateLines(res.stdout);
+  const garbage = lines.find((l) => !CONTAINER_NAME_RE.test(l));
   if (garbage !== undefined) {
     return {
       names: [],
       unknown: true,
       warnings: [
         `${CONTAINER_RUNTIME_BIN} ps --format output does not look like the requested template ` +
-          `(line contains whitespace: ${JSON.stringify(garbage)}) — the runtime may be ignoring --format ` +
-          'and printing a table instead. Running containers for this group are NOT confirmed stopped.',
+          `(line does not look like a container name: ${JSON.stringify(garbage)}) — the runtime may be ignoring ` +
+          '--format and printing something else (a table, JSON, …) instead. Running containers for this group ' +
+          'are NOT confirmed stopped.',
       ],
     };
   }
@@ -611,21 +629,24 @@ export function findContainers(
  * Per-group image tags: `<base>:<agent-group-id>`, plus whatever the config records.
  *
  * `unknown: true` means discovery did not run — the runtime binary failed, OR
- * it exited 0 with output that does not look like the requested `--format`
- * template. It must never be presented as "no image tag exists" — see the
- * module header.
+ * it exited 0 with a line that does not match the `repo:tag` token shape
+ * (`IMAGE_REF_RE`). It must never be presented as "no image tag exists" —
+ * see the module header.
  *
  * TASK-29 audited this for a parse-vs-exec gap (`findOnecliAgent`'s
  * `JSON.parse` failure mode) and found none: `--format
  * '{{.Repository}}:{{.Tag}}'` output is plain newline-delimited text, and
  * split/trim/filter into a Set of raw strings cannot throw the way
  * `JSON.parse` can. TASK-30 found the gap that check missed: a runtime that
- * ignores `--format` entirely and exits 0 with a human table needs no
- * exception to reach the same dangerous end state — every table line simply
+ * ignores `--format` entirely and exits 0 with something else — a human
+ * table, OR compact JSON, OR an unpadded single-column header — needs no
+ * exception to reach the same dangerous end state — every such line simply
  * fails the exact-membership check below and reads as "no tag exists",
  * exactly as garbage would in `findContainers`. Guarded the same way: reject
- * before the membership check if any non-blank line looks like a table row
- * rather than a bare `repo:tag` token (`looksLikeTableRow`).
+ * before the membership check if any non-blank line does not itself look
+ * like a `repo:tag` token (`IMAGE_REF_RE`) — a POSITIVE shape check, not a
+ * negative one keyed on whitespace, because a JSON line or a bare
+ * single-word header is whitespace-free and would sail through that.
  */
 export function findImageTags(
   env: TeardownEnv,
@@ -640,19 +661,17 @@ export function findImageTags(
       warnings: [`${CONTAINER_RUNTIME_BIN} images failed: ${res.stderr.trim() || 'unknown error'}`],
     };
   }
-  const lines = res.stdout
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const garbage = lines.find(looksLikeTableRow);
+  const lines = splitTemplateLines(res.stdout);
+  const garbage = lines.find((l) => !IMAGE_REF_RE.test(l));
   if (garbage !== undefined) {
     return {
       tags: [],
       unknown: true,
       warnings: [
         `${CONTAINER_RUNTIME_BIN} images --format output does not look like the requested template ` +
-          `(line contains whitespace: ${JSON.stringify(garbage)}) — the runtime may be ignoring --format ` +
-          "and printing a table instead. This group's image tag is NOT confirmed absent.",
+          `(line does not look like a repo:tag reference: ${JSON.stringify(garbage)}) — the runtime may be ` +
+          "ignoring --format and printing something else (a table, JSON, …) instead. This group's image tag " +
+          'is NOT confirmed absent.',
       ],
     };
   }

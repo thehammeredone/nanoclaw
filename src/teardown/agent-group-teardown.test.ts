@@ -233,6 +233,26 @@ describe('findContainers', () => {
     const res = findContainers(env, 'doomed');
     expect(res).toEqual({ names: ['nanoclaw-v2-doomed-1700000000'], unknown: false, warnings: [] });
   });
+
+  // TASK-30 round 2: the whitespace-based negative check only catches the
+  // table shape. A runtime that ignores --format and falls back to compact
+  // JSON (whitespace-free) sailed straight through it — reviewer-confirmed on
+  // `origin/skill/apple-container`, whose cleanupOrphans() rewrite uses
+  // `container ls --format json`, so JSON is at least as likely a fallback
+  // shape as a table for the runtime this task names.
+  it('flags "could not check" when the runtime prints compact JSON instead of --format output', () => {
+    env.exec = fakeExec({
+      'docker ps': {
+        ok: true,
+        stdout: '[{"id":"nanoclaw-v2-doomed-1700000000","status":"running"}]\n',
+        stderr: '',
+      },
+    });
+    const res = findContainers(env, 'doomed');
+    expect(res.names).toEqual([]);
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/does not look like/i);
+  });
 });
 
 describe('findImageTags', () => {
@@ -292,6 +312,37 @@ describe('findImageTags', () => {
     });
     const res = findImageTags(env, 'ag-doomed', null);
     expect(res).toEqual({ tags: ['nanoclaw-agent-v2-testslug:ag-doomed'], unknown: false, warnings: [] });
+  });
+
+  // TASK-30 round 2 — see the equivalent findContainers block above for the
+  // apple-container-json rationale. Both fixtures are whitespace-free, so the
+  // old `looksLikeTableRow` negative check let them silently read as "no tag".
+  it('flags "could not check" when the runtime prints compact JSON instead of --format output', () => {
+    env.exec = fakeExec({
+      'docker images': {
+        ok: true,
+        stdout: '[{"name":"nanoclaw-agent-v2-testslug","tag":"ag-doomed"}]\n',
+        stderr: '',
+      },
+    });
+    const res = findImageTags(env, 'ag-doomed', null);
+    expect(res.tags).toEqual([]);
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/does not look like/i);
+  });
+
+  it('flags "could not check" when the runtime prints an unpadded single-column header instead of --format output', () => {
+    env.exec = fakeExec({
+      'docker images': {
+        ok: true,
+        stdout: 'REPOSITORY\nnanoclaw-agent-v2-testslug\n',
+        stderr: '',
+      },
+    });
+    const res = findImageTags(env, 'ag-doomed', null);
+    expect(res.tags).toEqual([]);
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/does not look like/i);
   });
 });
 
