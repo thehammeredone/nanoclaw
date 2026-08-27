@@ -1,11 +1,11 @@
 ---
 id: TASK-31
 title: 'Teardown: element-level shape guard for onecli agents list entries'
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-08-22 17:49'
-updated_date: '2026-08-27 06:35'
+updated_date: '2026-08-27 06:36'
 labels: []
 dependencies: []
 ordinal: 31000
@@ -27,10 +27,16 @@ Both require onecli emitting element-level garbage behind exit 0, which is outsi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Non-object / null elements in the agents list array route to unknown:true rather than throwing out of findOnecliAgent
-- [ ] #2 An element missing 'id' does not produce a delete call with an undefined id — it routes to unknown:true or is skipped with a warning
-- [ ] #3 Tests cover {data:[null]}, {data:[scalar]}, and {data:[{identifier only}]}
+- [x] #1 Non-object / null elements in the agents list array route to unknown:true rather than throwing out of findOnecliAgent
+- [x] #2 An element missing 'id' does not produce a delete call with an undefined id — it routes to unknown:true or is skipped with a warning
+- [x] #3 Tests cover {data:[null]}, {data:[scalar]}, and {data:[{identifier only}]}
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -48,3 +54,9 @@ PROCESS CAVEAT, stated plainly: no independent delta-verifier ran for this fix r
 
 No live onecli or docker commands, no DB writes, no container restarts.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+findOnecliAgent now validates the elements of onecli's agents list, not just the top-level envelope. A null, scalar or array element routes to unknown:true instead of throwing a TypeError out of the function and surfacing as exit 1; an element that matches the target but carries no usable string id routes to unknown:true instead of driving a delete call with a garbage id; and an element that positively identifies as no agent at all can no longer produce a silent clean result. Structurally-invalid elements poison the whole response, matching the sibling filters' one-garbage-line-rejects-the-batch convention, while a well-formed element merely missing an id poisons only the target's own match. The shape warning reports an element's index and type rather than its contents, closing a path by which a columnar element carrying an accessToken would have been printed verbatim into plan warnings and stdout. Nine tests cover the payload shapes, each mutation-proven to fail without its guard. A false claim this branch had added to docs/state-discovery.md -- that the reconcile recipe throws rather than resolving to UNKNOWN -- was removed after executing the snippet to check.
+<!-- SECTION:FINAL_SUMMARY:END -->
