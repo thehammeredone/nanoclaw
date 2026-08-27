@@ -1,7 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 
-import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query as sdkQuery,
+  getSessionMessages,
+  type HookCallback,
+  type PreCompactHookInput,
+  type SessionMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
@@ -231,6 +237,107 @@ function createPreCompactHook(assistantName?: string): HookCallback {
   };
 }
 
+// ── Transcript archiving (daily rollover seam) ──
+//
+// Separate writer from the PreCompact hook above. PreCompact fires
+// mid-session when the SDK auto-compacts (~165k tokens); scheduled-task
+// sessions (Aurora, Radar) rarely approach that in a single day, so
+// PreCompact's archive effectively never fires for them. This writer fires
+// once, at the point poll-loop.ts drops a continuation id for the daily
+// rollover (shouldRunFresh()), archiving whatever transcript existed for
+// that id before it becomes unrecoverable.
+//
+// Naming / idempotency contract: files are named
+// `<date>-rollover-<sessionId>.md`. The `rollover-` prefix is reserved for
+// this writer — PreCompact's naming (a slugified compaction summary, or
+// `conversation-HHMM` when no summary is available) never produces it, so
+// the two writers can never land on the same filename or clobber each
+// other's output. Before doing any read/parse work we check whether that
+// exact file already exists; if so we skip — a second archiveSession() call
+// for the same session on the same day is an idempotent no-op, not a defect.
+
+interface RawTranscriptEntry {
+  type?: string;
+  message?: unknown;
+}
+
+/** Same extraction shape as parseTranscript() above, kept separate on
+ * purpose so this writer never needs to touch PreCompact's code path. */
+function extractParsedMessage(entry: RawTranscriptEntry): ParsedMessage | null {
+  if (entry.type === 'user' && entry.message && typeof entry.message === 'object') {
+    const msg = entry.message as { content?: unknown };
+    const text =
+      typeof msg.content === 'string'
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.map((c) => (c && typeof c === 'object' && 'text' in c ? String((c as { text?: unknown }).text ?? '') : '')).join('')
+          : '';
+    return text ? { role: 'user', content: text } : null;
+  }
+  if (entry.type === 'assistant' && entry.message && typeof entry.message === 'object') {
+    const msg = entry.message as { content?: unknown };
+    const text = Array.isArray(msg.content)
+      ? msg.content
+          .filter((c) => c && typeof c === 'object' && (c as { type?: string }).type === 'text')
+          .map((c) => (c as { text?: string }).text ?? '')
+          .join('')
+      : '';
+    return text ? { role: 'assistant', content: text } : null;
+  }
+  return null;
+}
+
+function parseSessionMessages(entries: SessionMessage[]): ParsedMessage[] {
+  const messages: ParsedMessage[] = [];
+  for (const entry of entries) {
+    const parsed = extractParsedMessage(entry as unknown as RawTranscriptEntry);
+    if (parsed) messages.push(parsed);
+  }
+  return messages;
+}
+
+/**
+ * Archive the transcript for `continuation` into `<cwd>/conversations/`. In
+ * production `cwd` is always `/workspace/agent`, matching PreCompact's
+ * hardcoded target — the cwd param exists so tests can point this at a temp
+ * directory instead of touching a real group's filesystem.
+ *
+ * Never throws: any failure (unknown session, missing transcript,
+ * unreadable/read-only conversations dir, malformed entries) is logged and
+ * swallowed so the caller's turn is never affected. See AgentProvider's
+ * archiveSession contract in providers/types.ts.
+ */
+async function archiveSessionTranscript(continuation: string, cwd: string, assistantName?: string): Promise<void> {
+  try {
+    const conversationsDir = path.join(cwd, 'conversations');
+    const filename = `${new Date().toISOString().split('T')[0]}-rollover-${continuation}.md`;
+    const filePath = path.join(conversationsDir, filename);
+
+    if (fs.existsSync(filePath)) {
+      log(`archiveSession: ${filename} already archived, skipping`);
+      return;
+    }
+
+    const entries = await getSessionMessages(continuation);
+    if (!entries || entries.length === 0) {
+      log(`archiveSession: no transcript found for session ${continuation}`);
+      return;
+    }
+
+    const messages = parseSessionMessages(entries);
+    if (messages.length === 0) {
+      log(`archiveSession: transcript for session ${continuation} had no user/assistant text`);
+      return;
+    }
+
+    fs.mkdirSync(conversationsDir, { recursive: true });
+    fs.writeFileSync(filePath, formatTranscriptMarkdown(messages, null, assistantName));
+    log(`archiveSession: archived rollover session to ${filename}`);
+  } catch (err) {
+    log(`archiveSession: failed to archive session ${continuation}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 // ── Provider ──
 
 /**
@@ -275,6 +382,10 @@ export class ClaudeProvider implements AgentProvider {
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);
+  }
+
+  async archiveSession(continuation: string, cwd: string): Promise<void> {
+    await archiveSessionTranscript(continuation, cwd, this.assistantName);
   }
 
   query(input: QueryInput): AgentQuery {

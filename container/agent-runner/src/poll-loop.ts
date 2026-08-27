@@ -44,6 +44,22 @@ export function shouldRunFresh(messages: Pick<MessageInRow, 'kind'>[]): boolean 
   return messages.some((m) => m.kind === 'task');
 }
 
+/**
+ * Best-effort archive of the transcript being dropped at daily rollover.
+ * Defense-in-depth on top of each provider's own internal try/catch (see
+ * AgentProvider.archiveSession in providers/types.ts) — a throwing or
+ * missing implementation must never break the caller's turn, so this is
+ * the single place that guarantees that regardless of provider behavior.
+ */
+async function archiveOutgoingSession(provider: AgentProvider, continuation: string, cwd: string): Promise<void> {
+  if (!provider.archiveSession) return;
+  try {
+    await provider.archiveSession(continuation, cwd);
+  } catch (err) {
+    log(`archiveSession failed (continuing rollover anyway): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export interface PollLoopConfig {
   provider: AgentProvider;
   /**
@@ -191,6 +207,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const runFresh = shouldRunFresh(keep);
     if (runFresh) {
       log('Batch contains a task-kind row — running without resume (fresh session)');
+      // Archive the outgoing transcript before the id is discarded below —
+      // this is the seam TASK-28 exists for: PreCompact (~165k token window)
+      // essentially never fires for a single day's task session, so without
+      // this the day's transcript becomes unrecoverable the moment
+      // `continuation` is cleared. Never let a failed archive block the
+      // rollover itself; the scheduled task must still run.
+      if (continuation) {
+        await archiveOutgoingSession(config.provider, continuation, config.cwd);
+      }
       // Drop the in-memory id too, not just the `resume` argument. The
       // provider persists its new session id the moment `init` fires, so
       // from here on the old id is pure staleness: if the query dies
