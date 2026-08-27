@@ -695,9 +695,14 @@ For `task` kind messages with a `script` field in the content:
 
 ### Transcript Archiving
 
-The agent-runner archives conversation transcripts before context compaction. For Claude, this is handled via the PreCompact hook (provider-internal). For other providers that don't have hooks, the agent-runner archives after each query completes based on the provider's output.
+Two independent writers populate `conversations/`, both provider-internal to Claude today:
 
-Archive location: `/workspace/agent/conversations/{date}-{summary}.md`
+- **PreCompact hook** — fires when the SDK auto-compacts (~165k token window). Archive location: `/workspace/agent/conversations/{date}-{summary}.md` (or `{date}-conversation-{HHMM}.md` when no summary is available).
+- **Rollover archiver** (`AgentProvider.archiveSession()`, TASK-28) — fires once, at the daily context-rollover seam in `poll-loop.ts` (see "Task-fresh rollover" under Session Resume below), right before the pre-rollover continuation id is discarded. Without this, task-driven sessions (Aurora, Radar) rarely accumulate the ~165k tokens PreCompact needs, so PreCompact alone would leave `conversations/` effectively frozen for them. Archive location: `/workspace/agent/conversations/{date}-rollover-{sessionId}.md`.
+
+The `rollover-` filename prefix is reserved for the rollover archiver and is never produced by PreCompact's naming, so the two writers can't collide or clobber each other's files. The rollover archiver also checks for an existing file with that exact name before writing, so a repeated call for the same session on the same day is an idempotent no-op rather than a duplicate archive. Neither writer can throw out to the caller — failures are logged and swallowed so a broken archive never blocks the agent's turn or the scheduled job.
+
+For other providers that don't have hooks, there is currently no archiving — `AgentProvider.archiveSession()` is optional and unimplemented for them.
 
 ### Session Resume
 
