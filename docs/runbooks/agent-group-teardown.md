@@ -40,7 +40,7 @@ Flags: `--yes` (execute), `--folder <name>`, `--keep-onecli`, `--keep-images`.
 |---|---|
 | `0` | Plan printed (dry run), or executed with **every** step complete. |
 | `1` | Usage error, or the target could not be resolved. Nothing ran. |
-| `2` | Executed but **incomplete**. The DB half committed; at least one of the group directory, session directory, image tag, container stop or OneCLI vault agent was not dealt with — including cases where discovery itself failed (e.g. `docker`/`onecli` unreachable; `onecli` exiting 0 with output that cannot be parsed or is not the expected shape; or the container runtime exiting 0 with a human-readable table instead of the requested `--format` output — see below), which counts as incomplete even though nothing was "attempted and failed" in the usual sense. The `INCOMPLETE` block lists what. |
+| `2` | Executed but **incomplete**. The DB half committed; at least one of the group directory, session directory, image tag, container stop or OneCLI vault agent was not dealt with — including cases where discovery itself failed (e.g. `docker`/`onecli` unreachable; `onecli` exiting 0 with output that cannot be parsed or is not the expected shape; or the container runtime exiting 0 with output that doesn't match the requested `--format` template's shape — a human-readable table, compact JSON, or anything else — see below), which counts as incomplete even though nothing was "attempted and failed" in the usual sense. The `INCOMPLETE` block lists what. |
 
 Never read `2` as success. The dangerous residue is the OneCLI vault agent: it
 still holds injectable credentials for a group that no longer exists.
@@ -239,12 +239,17 @@ caller.
   `{ data: [...] }` shape (a bare array, a scalar, `null`, `{"data":{}}`) —
   that is discovery failing just as surely as a non-zero exit, so it is
   `(COULD NOT CHECK …)` too, not `(none)`. It also covers `<runtime> ps`/`images`
-  exiting 0 with a human-readable table instead of the `--format` output that
-  was requested — e.g. an Apple Container build that ignores `--format`. Every
-  requested template resolves to one whitespace-free token per line (a
-  container name, or `repo:tag`); a table row is column-padded and always
-  contains whitespace, so any such line flips the result to `unknown` rather
-  than letting every row silently fail the match and read as `(none)`
+  exiting 0 with something other than the requested `--format` output — a
+  human-readable table, or compact JSON (a runtime whose `--format` flag takes
+  `json|table` rather than a Go template, e.g. Apple Container, is at least as
+  likely to fall back to JSON as to a table). Each line is checked against the
+  positive shape the template can actually produce (a bare container name, or
+  a `repo:tag` token) rather than against a negative "does this look like a
+  table row" heuristic — the negative form only catches column-padded,
+  whitespace-containing output and lets whitespace-free garbage (JSON, an
+  unpadded single-column header) through. Any line that fails its shape check
+  flips the result to `unknown` rather than letting it silently fail the match
+  and read as `(none)`
   (TASK-30). Otherwise an operator would approve deleting rows and session
   directories out from under a live container, or leave a vault agent still
   holding injectable credentials for a deleted group. Every one of these
