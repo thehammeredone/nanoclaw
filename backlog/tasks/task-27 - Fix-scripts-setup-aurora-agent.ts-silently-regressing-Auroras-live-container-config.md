@@ -3,7 +3,7 @@ id: TASK-27
 title: >-
   Fix scripts/setup-aurora-agent.ts silently regressing Aurora's live container
   config
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 23:07'
@@ -58,3 +58,9 @@ Caller coverage was nil at review time -- deleting the early return on the refus
 
 pnpm test 472 passed / 1 skipped. data/v2.db md5 and ~/.config/nanoclaw/mount-allowlist.json md5 both unchanged throughout; the seeder was never run against real state; Aurora's 06:00 job untouched.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+scripts/setup-aurora-agent.ts is now genuinely safe to re-run. A new pure module scripts/mcp-servers-guard.ts decides between write / dry-run / needs-confirmation before any mutating step runs, so the seeder diff-and-confirms an already-configured group's mcp_servers instead of clobbering it wholesale: --dry-run previews and writes nothing anywhere, --force skips the prompt, and a non-TTY run refuses immediately without touching stdin so automation cannot hang. The diff an operator reads is redacted by key pattern, showing whether a secret changed without printing it. decideSeederOutcome and runSeeder were extracted so the caller is testable; scripts/mcp-servers-guard.test.ts and scripts/setup-aurora-agent.test.ts cover both against hermetic fixture DBs, never data/v2.db. The runbook and the bootstrap .sh header now describe the real --dry-run then --force procedure. Two sibling call sites (packages_apt, additional_mounts) remain unguarded by design and are filed as a follow-up.
+<!-- SECTION:FINAL_SUMMARY:END -->
