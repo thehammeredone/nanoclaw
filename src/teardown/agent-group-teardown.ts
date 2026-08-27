@@ -830,7 +830,7 @@ export function findOnecliAgent(
   // disproportionate blast radius for data this call never touches.
   // Deliberately drop every other field — `agents list` includes accessToken.
   return {
-    agent: { id: match.id, name: match.name ?? '', identifier: match.identifier ?? wanted },
+    agent: { id: match.id, name: match.name ?? '', identifier: match.identifier },
     unknown: false,
     warnings: [],
   };
