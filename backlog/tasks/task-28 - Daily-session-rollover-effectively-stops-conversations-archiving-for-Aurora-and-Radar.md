@@ -3,9 +3,11 @@ id: TASK-28
 title: >-
   Daily session rollover effectively stops conversations/ archiving for Aurora
   and Radar
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-21 00:21'
+updated_date: '2026-08-27 00:18'
 labels:
   - agent-runner
   - aurora
