@@ -85,18 +85,42 @@ describe('ClaudeProvider.archiveSession (rollover archiving)', () => {
     expect(content).toContain('Aurora');
   });
 
-  it('naming rule: the rollover- prefix never collides with PreCompact-style names', () => {
-    // PreCompact (see createPreCompactHook, untouched by this task) names
-    // files either `<date>-<slugified-summary>.md` or
-    // `<date>-conversation-HHMM.md` — never starting with "rollover-".
-    // This is the whole collision-avoidance contract for AC#2: assert it
-    // directly so a future rename of either scheme trips this test.
-    const rolloverName = `2026-08-25-rollover-${SESSION_ID}.md`;
-    const preCompactSlugName = '2026-08-25-daily-standup-notes.md';
-    const preCompactFallbackName = '2026-08-25-conversation-0600.md';
-    expect(rolloverName.includes('-rollover-')).toBe(true);
-    expect(preCompactSlugName.includes('-rollover-')).toBe(false);
-    expect(preCompactFallbackName.includes('-rollover-')).toBe(false);
+  it('naming rule: the rollover- prefix never collides with PreCompact-style names', async () => {
+    // Rollover side: derive the real filename from the real archiveSession()
+    // call (not a hand-typed literal) — this half fails if the rollover
+    // writer's naming ever changes.
+    writeFixtureTranscript(SESSION_ID);
+    const provider = new ClaudeProvider({});
+    await provider.archiveSession(SESSION_ID, cwd);
+    const files = conversationsFiles();
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^\d{4}-\d{2}-\d{2}-rollover-.+\.md$/);
+    expect(files[0].includes('-rollover-')).toBe(true);
+
+    // PreCompact side: createPreCompactHook (see claude.ts) writes to a
+    // hardcoded `/workspace/agent/conversations` path — it cannot be safely
+    // invoked from a test sandbox without risking a write outside the temp
+    // dirs this suite is scoped to (see the file-level comment). So instead
+    // of duplicating its naming logic as an opaque literal (the tautology
+    // this test used to be), read it directly out of the real source: this
+    // fails if either the slug branch or the `conversation-HHMM` fallback
+    // branch is ever changed to emit the "rollover-" token, which is the
+    // actual collision this test guards against.
+    const claudeTsPath = path.join(import.meta.dir, 'claude.ts');
+    const source = fs.readFileSync(claudeTsPath, 'utf-8');
+    const hookStart = source.indexOf('function createPreCompactHook');
+    const hookEnd = source.indexOf('// ── Transcript archiving (daily rollover seam) ──');
+    expect(hookStart).toBeGreaterThan(-1);
+    expect(hookEnd).toBeGreaterThan(hookStart);
+    const hookSource = source.slice(hookStart, hookEnd);
+
+    // Neither PreCompact naming branch may itself emit "rollover-".
+    expect(hookSource).not.toMatch(/['`]rollover-/);
+    // The two known branches must still be the ones the collision-freedom
+    // claim was verified against — a slugified summary and the
+    // conversation-HHMM fallback.
+    expect(hookSource).toContain("replace(/[^a-z0-9]+/g, '-')");
+    expect(hookSource).toContain('conversation-${');
   });
 
   it('idempotent: a second archiveSession() call for the same session is a no-op, never overwrites', async () => {
