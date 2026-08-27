@@ -56,7 +56,8 @@ export function isEmptyMcpServers(value: unknown): boolean {
  * must be able to tell "password rotated" from "password unchanged" without
  * ever seeing either value.
  */
-const SECRET_KEY_PATTERN = /(PASSWORD|SECRET|TOKEN|CREDENTIAL|API[_-]?KEY|EMAIL)/i;
+const SECRET_KEY_PATTERN =
+  /(PASSWORD|PASSWD|PWD|SECRET|TOKEN|CREDENTIAL|API[_-]?KEY|AUTH|COOKIE|SESSION|PRIVATE[_-]?KEY|SIGNATURE|EMAIL)/i;
 
 /** Recursively redact secret-looking keys in `value`, marking each as changed/unchanged relative to `other`. */
 function redactForDiff(value: unknown, other: unknown): unknown {
