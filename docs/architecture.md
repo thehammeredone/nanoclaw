@@ -895,7 +895,7 @@ Pre-scripts: if a task message has a `script` field, run it first. If `wakeAgent
 - AgentProvider interface wraps SDK-specific query logic (trunk ships the `claude` provider; additional providers like OpenCode install via `/add-<provider>` skills)
 - Session resume via provider-specific mechanisms
 - System prompt loading from CLAUDE.md files
-- Transcript archiving to `conversations/` (Claude provider): PreCompact hook at ~165k-token compaction, plus `archiveSession()` at the daily context-rollover seam (TASK-28) so task-driven sessions that rarely compact still get archived
+- Transcript archiving to `conversations/` (Claude provider): PreCompact hook at ~165k-token compaction, plus `archiveSession()` at the context-rollover seam and on `/clear` (TASK-28) so task-driven sessions that rarely compact still get archived — fires on every rollover (e.g. hourly for a group with an hourly recurrence), not just daily; no GC exists for the resulting files
 - Script execution for task-kind messages
 
 ## Open Questions
