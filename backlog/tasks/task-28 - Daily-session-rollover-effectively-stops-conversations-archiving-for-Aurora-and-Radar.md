@@ -3,7 +3,7 @@ id: TASK-28
 title: >-
   Daily session rollover effectively stops conversations/ archiving for Aurora
   and Radar
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-08-21 00:21'
@@ -92,3 +92,9 @@ KNOWN, DELIBERATELY NOT FIXED: conversations/ still has no GC, and shouldRunFres
 
 bun test 113 pass / 0 fail; tsc -p container/agent-runner/tsconfig.json --noEmit clean. No host src/ touched. No container restarted, no real groups/ or ~/.claude/projects/ written.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+conversations/ archiving no longer stops for the agents that carry scheduled tasks. Implemented option (b): a second, additive writer at the rollover seam. AgentProvider gains an optional archiveSession(continuation, cwd); ClaudeProvider implements it over the SDK's public getSessionMessages(); poll-loop.ts archives the outgoing transcript before dropping the continuation, on both the daily rollover and /clear. PreCompact is byte-unchanged and remains the compaction-time writer -- the two never collide, because rollover files carry a -rollover- token PreCompact's naming cannot produce, and a session is archived at most once via a date-independent scan that survives a continuation being restored from the store. Archiving can never break a turn: every failure is caught at both levels and the await is bounded by a 10s timeout. Covered by 9 tests in the Bun tree, all mutation-proven to fail for the right reason, hermetic against temp dirs. Known and documented: conversations/ still has no GC, and the seam fires per task batch rather than once daily.
+<!-- SECTION:FINAL_SUMMARY:END -->
