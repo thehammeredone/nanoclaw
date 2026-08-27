@@ -455,6 +455,21 @@ describe('findOnecliAgent', () => {
     expect(res.warnings.join()).toMatch(/unexpected onecli agents list element shape/);
   });
 
+  // An array element passes `typeof a !== 'object'` (arrays ARE 'object'), so
+  // the `Array.isArray(a)` arm of the guard is the only thing that catches
+  // it. Without that arm, a columnar output row like `['ag-doomed', 'Doomed']`
+  // would read as `a.identifier === undefined` — silently "not a match" —
+  // exercising this in isolation (finding review, TASK-31 round 2).
+  it('flags "could not check" for an array element instead of silently treating it as a non-match (TASK-31 review)', () => {
+    env.exec = fakeExec({
+      'onecli agents list': { ok: true, stdout: JSON.stringify({ data: [['ag-doomed', 'Doomed']] }), stderr: '' },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list element shape/);
+  });
+
   it('routes to unknown:true rather than a delete call with an undefined id when the TARGET agent is missing "id" (TASK-31)', () => {
     // identifier-only match: this element genuinely IS ag-doomed's vault
     // agent, just missing "id". Skipping it with a warning would report a
