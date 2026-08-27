@@ -695,9 +695,16 @@ For `task` kind messages with a `script` field in the content:
 
 ### Transcript Archiving
 
-The agent-runner archives conversation transcripts before context compaction. For Claude, this is handled via the PreCompact hook (provider-internal). For other providers that don't have hooks, the agent-runner archives after each query completes based on the provider's output.
+Two independent writers populate `conversations/`, both provider-internal to Claude today:
 
-Archive location: `/workspace/agent/conversations/{date}-{summary}.md`
+- **PreCompact hook** — fires when the SDK auto-compacts (~165k token window). Archive location: `/workspace/agent/conversations/{date}-{summary}.md` (or `{date}-conversation-{HHMM}.md` when no summary is available).
+- **Rollover archiver** (`AgentProvider.archiveSession()`, TASK-28) — fires at the context-rollover seam in `poll-loop.ts` (see "Task-fresh rollover" under Session Resume below) and on `/clear`, right before the outgoing continuation id is discarded. This is *not* once a day: `shouldRunFresh()` fires for any batch containing a `kind='task'` row, so a group with an hourly recurrence rolls over — and archives — hourly, not daily. Without this, task-driven sessions (Aurora, Radar) rarely accumulate the ~165k tokens PreCompact needs, so PreCompact alone would leave `conversations/` effectively frozen for them. Archive location: `/workspace/agent/conversations/{date}-rollover-{sessionId}.md`.
+
+The `rollover-` filename prefix is reserved for the rollover archiver and is never produced by PreCompact's naming, so the two writers can't collide or clobber each other's files. The rollover archiver also checks whether *any* file already exists for that session id (any date), not just today's exact filename, so a repeated call for the same session — even after the session id was restored from the store on a later day — is an idempotent no-op rather than a duplicate archive. Neither writer can throw out to the caller — failures are logged and swallowed so a broken archive never blocks the agent's turn or the scheduled job.
+
+There is currently no retention policy or GC for `conversations/`. A group with frequent recurring tasks accrues one rollover file per rollover into a read-write-mounted directory the agent is instructed to grep — operators running high-frequency schedules should expect unbounded growth over time.
+
+For other providers that don't have hooks, there is currently no archiving — `AgentProvider.archiveSession()` is optional and unimplemented for them.
 
 ### Session Resume
 

@@ -14,6 +14,18 @@ export interface AgentProvider {
    * (missing transcript, unknown session, etc.) and should be cleared.
    */
   isSessionInvalid(err: unknown): boolean;
+
+  /**
+   * Archive the transcript for `continuation` before it's discarded at the
+   * daily context rollover (see shouldRunFresh() in poll-loop.ts). Optional:
+   * providers whose continuation isn't a locally-readable transcript can
+   * omit this and rollover simply won't archive for that provider.
+   *
+   * MUST NOT throw — implementations should catch and log internally so a
+   * failed archive never breaks the agent's turn. The poll-loop also wraps
+   * this call defensively, but a throwing implementation is still a defect.
+   */
+  archiveSession?(continuation: string, cwd: string): Promise<void> | void;
 }
 
 /**

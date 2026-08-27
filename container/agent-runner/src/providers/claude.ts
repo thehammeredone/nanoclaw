@@ -1,7 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 
-import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query as sdkQuery,
+  getSessionMessages,
+  type HookCallback,
+  type PreCompactHookInput,
+  type SessionMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
@@ -231,6 +237,136 @@ function createPreCompactHook(assistantName?: string): HookCallback {
   };
 }
 
+// ── Transcript archiving (daily rollover seam) ──
+//
+// Separate writer from the PreCompact hook above. PreCompact fires
+// mid-session when the SDK auto-compacts (~165k tokens); scheduled-task
+// sessions (Aurora, Radar) rarely approach that in a single day, so
+// PreCompact's archive effectively never fires for them. This writer fires
+// once, at the point poll-loop.ts drops a continuation id for the daily
+// rollover (shouldRunFresh()), archiving whatever transcript existed for
+// that id before it becomes unrecoverable.
+//
+// Naming / idempotency contract: files are named
+// `<date>-rollover-<sessionId>.md`. The `rollover-` prefix is reserved for
+// this writer — PreCompact's naming (a slugified compaction summary, or
+// `conversation-HHMM` when no summary is available) never produces it, so
+// the two writers can never land on the same filename or clobber each
+// other's output.
+//
+// Idempotency is keyed on session id ALONE, not id+date: before any
+// read/parse work we scan the conversations dir for any existing
+// `*-rollover-<sessionId>.md` file, regardless of what date is in its name.
+// A same-day exact-filename check is not enough — poll-loop.ts's rollover
+// clears the in-memory continuation but does not clear the persisted one,
+// so a fresh query that dies before `init` restores the same session id
+// from the store, and the *next* day's rollover would archive it again
+// under a different filename if the guard were date-scoped. A given
+// session id must be archived at most once, ever, no matter which day (or
+// how many days later) the second attempt happens.
+
+interface RawTranscriptEntry {
+  type?: string;
+  message?: unknown;
+}
+
+/** Same extraction shape as parseTranscript() above, kept separate on
+ * purpose so this writer never needs to touch PreCompact's code path. */
+function extractParsedMessage(entry: RawTranscriptEntry): ParsedMessage | null {
+  if (entry.type === 'user' && entry.message && typeof entry.message === 'object') {
+    const msg = entry.message as { content?: unknown };
+    const text =
+      typeof msg.content === 'string'
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.map((c) => (c && typeof c === 'object' && 'text' in c ? String((c as { text?: unknown }).text ?? '') : '')).join('')
+          : '';
+    return text ? { role: 'user', content: text } : null;
+  }
+  if (entry.type === 'assistant' && entry.message && typeof entry.message === 'object') {
+    const msg = entry.message as { content?: unknown };
+    const text = Array.isArray(msg.content)
+      ? msg.content
+          .filter((c) => c && typeof c === 'object' && (c as { type?: string }).type === 'text')
+          .map((c) => (c as { text?: string }).text ?? '')
+          .join('')
+      : '';
+    return text ? { role: 'assistant', content: text } : null;
+  }
+  return null;
+}
+
+function parseSessionMessages(entries: SessionMessage[]): ParsedMessage[] {
+  const messages: ParsedMessage[] = [];
+  for (const entry of entries) {
+    const parsed = extractParsedMessage(entry as unknown as RawTranscriptEntry);
+    if (parsed) messages.push(parsed);
+  }
+  return messages;
+}
+
+/**
+ * Local-calendar-day date stamp (`YYYY-MM-DD`), deliberately NOT
+ * `toISOString().split('T')[0]` (which is UTC). PreCompact's filenames use
+ * UTC — a pre-existing quirk we leave alone since it isn't this writer's
+ * code — but this writer's idempotency guard no longer depends on the date
+ * matching (see the comment above), so there's no reason to inherit the
+ * UTC-vs-local mismatch: using local here keeps the rollover filename's
+ * date consistent with formatTranscriptMarkdown's local `Archived: …` body
+ * timestamp.
+ */
+function localDateStamp(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Archive the transcript for `continuation` into `<cwd>/conversations/`. In
+ * production `cwd` is always `/workspace/agent`, matching PreCompact's
+ * hardcoded target — the cwd param exists so tests can point this at a temp
+ * directory instead of touching a real group's filesystem.
+ *
+ * Never throws: any failure (unknown session, missing transcript,
+ * unreadable/read-only conversations dir, malformed entries) is logged and
+ * swallowed so the caller's turn is never affected. See AgentProvider's
+ * archiveSession contract in providers/types.ts.
+ */
+async function archiveSessionTranscript(continuation: string, cwd: string, assistantName?: string): Promise<void> {
+  try {
+    const conversationsDir = path.join(cwd, 'conversations');
+    const rolloverSuffix = `-rollover-${continuation}.md`;
+
+    if (fs.existsSync(conversationsDir) && fs.readdirSync(conversationsDir).some((f) => f.endsWith(rolloverSuffix))) {
+      log(`archiveSession: session ${continuation} already archived, skipping`);
+      return;
+    }
+
+    const entries = await getSessionMessages(continuation);
+    if (!entries || entries.length === 0) {
+      log(`archiveSession: no transcript found for session ${continuation}`);
+      return;
+    }
+
+    const messages = parseSessionMessages(entries);
+    if (messages.length === 0) {
+      log(`archiveSession: transcript for session ${continuation} had no user/assistant text`);
+      return;
+    }
+
+    // Local date, not UTC — matches formatTranscriptMarkdown's `Archived: …`
+    // body timestamp (also local via toLocaleString), so a file's name and
+    // its contents never disagree on which calendar day it belongs to.
+    const filename = `${localDateStamp(new Date())}-rollover-${continuation}.md`;
+    fs.mkdirSync(conversationsDir, { recursive: true });
+    fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, null, assistantName));
+    log(`archiveSession: archived rollover session to ${filename}`);
+  } catch (err) {
+    log(`archiveSession: failed to archive session ${continuation}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 // ── Provider ──
 
 /**
@@ -275,6 +411,10 @@ export class ClaudeProvider implements AgentProvider {
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);
+  }
+
+  async archiveSession(continuation: string, cwd: string): Promise<void> {
+    await archiveSessionTranscript(continuation, cwd, this.assistantName);
   }
 
   query(input: QueryInput): AgentQuery {

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 15:00'
-updated_date: '2026-08-21 00:20'
+updated_date: '2026-08-27 00:52'
 labels:
   - aurora
   - radar
@@ -55,16 +55,6 @@ Divergence warning: hammer has never modified container/agent-runner/src/provide
 - [x] #4 Radar's 6:20 digest also runs fresh and still does not repeat stories
 - [x] #5 No change required to PreCompact archiving; conversations/ still receives archives
 <!-- AC:END -->
-
-
-
-
-
-
-
-
-
-
 
 ## Implementation Notes
 
@@ -130,6 +120,8 @@ effect only after ./container/build.sh and a container restart/respawn. No group
 agent-runner-src/ overlay shadows poll-loop.ts, so the rebuild is the only gate.
 
 TASK-25 NOTE: this is hammer's first modification to poll-loop.ts. The rebase must carry it.
+
+2026-08-27 (orchestrator): this task's claim that PreCompact is the SOLE writer to groups/<folder>/conversations/ is superseded by task-28, which adds a second writer at the daily-rollover seam (files named <date>-rollover-<sessionId>.md). PreCompact itself is unchanged and remains the compaction-time writer.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

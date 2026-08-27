@@ -318,7 +318,7 @@ describe('poll loop integration', () => {
 
 // Helper: run poll loop until aborted or timeout. The loop itself is
 // registered in `activeLoops` so afterEach can shut it down for real.
-async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
+async function runPollLoopWithTimeout(provider: AgentProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
   const queries: AgentQuery[] = [];
   const tracked: AgentProvider = {
     supportsNativeSlashCommands: provider.supportsNativeSlashCommands,
@@ -328,6 +328,12 @@ async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSigna
       queries.push(q);
       return q;
     },
+    // Forward archiveSession only if the underlying provider implements it —
+    // matches the real optional-method contract so tests that don't care
+    // about archiving (the vast majority) aren't affected.
+    ...(provider.archiveSession
+      ? { archiveSession: (continuation: string, cwd: string) => provider.archiveSession!(continuation, cwd) }
+      : {}),
   };
   const raw = runPollLoop({
     provider: tracked,
@@ -442,6 +448,34 @@ describe('poll loop — /clear command', () => {
 
     await loopPromise.catch(() => {});
   });
+
+  it('TASK-28: archives the outgoing continuation before dropping it', async () => {
+    setContinuation('mock', 'S1-old-transcript');
+
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+         VALUES ('m-clear', 'chat', datetime('now'), 'pending', 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ text: '/clear' }));
+
+    const provider = new RecordingProvider('S2-unused', () => '<message to="discord-test">should not run</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    // /clear must not have started a query at all...
+    expect(provider.continuations).toEqual([]);
+    // ...but it must have archived the transcript it was about to discard,
+    // same as the daily-rollover seam. Losing this on /clear is exactly the
+    // transcript loss the archiver exists to prevent.
+    expect(provider.archiveCalls).toEqual([{ continuation: 'S1-old-transcript', cwd: '/tmp' }]);
+    expect(getContinuation('mock')).toBeUndefined();
+
+    await loopPromise.catch(() => {});
+  });
 });
 
 describe('poll loop — task-fresh session rollover', () => {
@@ -542,6 +576,68 @@ describe('poll loop — task-fresh session rollover', () => {
 
     await loopPromise.catch(() => {});
   });
+
+  it('TASK-28: archives the pre-rollover continuation before dropping it, ahead of the fresh query', async () => {
+    setContinuation('mock', 'S1-old-transcript');
+
+    insertTask('t-task', { prompt: 'daily report' });
+
+    const provider = new RecordingProvider('S2-fresh', () => '<message to="discord-test">report</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 4000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 1, 2000);
+    controller.abort();
+
+    // Archived exactly the id that was about to be dropped, into the
+    // configured cwd — and did so before the fresh query fired.
+    expect(provider.archiveCalls).toEqual([{ continuation: 'S1-old-transcript', cwd: '/tmp' }]);
+    expect(provider.callOrder).toEqual(['archive:S1-old-transcript', 'query:fresh']);
+    expect(provider.continuations).toEqual([undefined]);
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('TASK-28: a throwing archiveSession never blocks the scheduled task from running', async () => {
+    setContinuation('mock', 'S1-old-transcript');
+
+    insertTask('t-task', { prompt: 'daily report' });
+
+    const provider = new RecordingProvider('S2-fresh', () => '<message to="discord-test">report</message>', {
+      archiveThrows: true,
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 4000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 1, 2000);
+    controller.abort();
+
+    // The archive call happened (and threw) but the task still ran fresh
+    // and delivered its result normally.
+    expect(provider.archiveCalls).toEqual([{ continuation: 'S1-old-transcript', cwd: '/tmp' }]);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('report');
+    expect(getContinuation('mock')).toBe('S2-fresh');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('TASK-28: no archive call when there is no pre-rollover continuation to drop', async () => {
+    // No setContinuation() call — first-ever task run for this session.
+    insertTask('t-task', { prompt: 'daily report' });
+
+    const provider = new RecordingProvider('S1-first-ever', () => '<message to="discord-test">report</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 4000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 1, 2000);
+    controller.abort();
+
+    expect(provider.archiveCalls).toEqual([]);
+
+    await loopPromise.catch(() => {});
+  });
 });
 
 function insertTask(id: string, content: object) {
@@ -557,25 +653,38 @@ function insertTask(id: string, content: object) {
  * Provider that records the continuation it was handed on every query and
  * every push() it received, so tests can assert on resume behaviour.
  * Optionally throws after emitting `init` on the first query only.
+ *
+ * Also implements archiveSession() so rollover-archiving tests can assert
+ * it was called with the pre-rollover id, in order relative to the fresh
+ * query, and that a throwing implementation never blocks the turn.
  */
 class RecordingProvider {
   readonly supportsNativeSlashCommands = false;
   readonly continuations: Array<string | undefined> = [];
   readonly pushes: string[] = [];
+  readonly archiveCalls: Array<{ continuation: string; cwd: string }> = [];
+  readonly callOrder: string[] = [];
   private queryCount = 0;
 
   constructor(
     private sessionId: string,
     private responseFactory: (prompt: string) => string,
-    private opts: { throwOnFirstQuery?: boolean; keepOpen?: boolean } = {},
+    private opts: { throwOnFirstQuery?: boolean; keepOpen?: boolean; archiveThrows?: boolean } = {},
   ) {}
 
   isSessionInvalid(): boolean {
     return false;
   }
 
+  async archiveSession(continuation: string, cwd: string): Promise<void> {
+    this.archiveCalls.push({ continuation, cwd });
+    this.callOrder.push(`archive:${continuation}`);
+    if (this.opts.archiveThrows) throw new Error('archive boom');
+  }
+
   query(input: { prompt: string; continuation?: string; cwd: string }) {
     this.continuations.push(input.continuation);
+    this.callOrder.push(`query:${input.continuation ?? 'fresh'}`);
     const shouldThrow = this.opts.throwOnFirstQuery === true && this.queryCount === 0;
     // Closing the stream after the first result is the default so each batch
     // becomes its own query — that is what lets a test observe the resume
