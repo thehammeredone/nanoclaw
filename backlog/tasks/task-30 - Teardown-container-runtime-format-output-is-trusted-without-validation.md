@@ -1,11 +1,11 @@
 ---
 id: TASK-30
 title: 'Teardown: container-runtime --format output is trusted without validation'
-status: In Progress
+status: Done
 assignee:
   - '@orchestrator'
 created_date: '2026-08-22 14:53'
-updated_date: '2026-08-27 06:07'
+updated_date: '2026-08-27 06:08'
 labels: []
 dependencies: []
 ordinal: 30000
@@ -27,10 +27,16 @@ Verification constraint for AC#2: Apple Container is macOS-only and this install
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 findImageTags and findContainers cannot silently report (none) when the container runtime ignores the --format template
-- [ ] #2 Behavior verified for at least the docker and apple-container runtime paths
-- [ ] #3 docs/runbooks/agent-group-teardown.md updated if the failure-mode list changes
+- [x] #1 findImageTags and findContainers cannot silently report (none) when the container runtime ignores the --format template
+- [x] #2 Behavior verified for at least the docker and apple-container runtime paths
+- [x] #3 docs/runbooks/agent-group-teardown.md updated if the failure-mode list changes
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Implementation Notes
 
@@ -49,3 +55,9 @@ AC#2 remains partially unverifiable by construction: Apple Container is macOS-on
 
 pnpm test 482 passed / 1 skipped; pnpm run build clean. No docker mutation commands, no DB writes, no container restarts.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+findImageTags and findContainers can no longer silently report (none) when the container runtime ignores the --format template. Each non-blank stdout line is now validated against the POSITIVE shape the template can actually produce -- a bare container name, or a repo:tag reference -- rather than a negative 'does this look like a table row' heuristic, which only caught column-padded output and let whitespace-free garbage through. Compact JSON (the likely Apple Container fallback, whose --format takes json|table rather than a Go template), unpadded single-column headers, digests and bare IDs all now flip the result to unknown, which flows through collectIncomplete to exit 2 instead of a zero exit with images and containers still alive. A shared splitTemplateLines() keeps both filters in lockstep while their shape checks stay distinct. The runbook's exit-code table, the safety-properties bullet and delete-agent-group.ts's exit-2 comment all agree again, and the runbook records the one residual gap a shape check cannot close. AC#2's apple-container half is satisfied by shape fixtures on the exec seam as the task specified; the live apple-container run is unverified, because that runtime is macOS-only and this install is Linux/WSL2.
+<!-- SECTION:FINAL_SUMMARY:END -->
