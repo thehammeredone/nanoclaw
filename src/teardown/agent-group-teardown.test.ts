@@ -431,6 +431,126 @@ describe('findOnecliAgent', () => {
     expect(res.unknown).toBe(true);
     expect(res.warnings.join()).toMatch(/unexpected onecli agents list shape/);
   });
+
+  // TASK-31: the top-level guard above trusts every element inside a
+  // well-formed `data` array. A `null` element throws out of the `.find`
+  // predicate (`a.identifier`) the same uncaught-exception-mis-surfaced-as-
+  // exit-1 way TASK-29 closed at the top level, one layer deeper.
+
+  it('flags "could not check" for a null element instead of throwing (TASK-31)', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: JSON.stringify({ data: [null] }), stderr: '' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list element shape/);
+  });
+
+  it('flags "could not check" for a scalar element instead of silently treating it as a non-match (TASK-31)', () => {
+    env.exec = fakeExec({
+      'onecli agents list': { ok: true, stdout: JSON.stringify({ data: ['not-an-agent'] }), stderr: '' },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list element shape/);
+  });
+
+  // An array element passes `typeof a !== 'object'` (arrays ARE 'object'), so
+  // the `Array.isArray(a)` arm of the guard is the only thing that catches
+  // it. Without that arm, a columnar output row like `['ag-doomed', 'Doomed']`
+  // would read as `a.identifier === undefined` — silently "not a match" —
+  // exercising this in isolation (finding review, TASK-31 round 2).
+  it('flags "could not check" for an array element instead of silently treating it as a non-match (TASK-31 review)', () => {
+    env.exec = fakeExec({
+      'onecli agents list': { ok: true, stdout: JSON.stringify({ data: [['ag-doomed', 'Doomed']] }), stderr: '' },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list element shape/);
+  });
+
+  it('routes to unknown:true rather than a delete call with an undefined id when the TARGET agent is missing "id" (TASK-31)', () => {
+    // identifier-only match: this element genuinely IS ag-doomed's vault
+    // agent, just missing "id". Skipping it with a warning would report a
+    // clean teardown while the live vault agent (with its injectable
+    // credentials) survives untouched — the same silent-(none) failure mode
+    // this module exists to prevent. So this must be unknown:true, not a
+    // skip.
+    env.exec = fakeExec({
+      'onecli agents list': {
+        ok: true,
+        stdout: JSON.stringify({ data: [{ identifier: 'ag-doomed', name: 'Doomed' }] }),
+        stderr: '',
+      },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/missing "id"/);
+  });
+
+  it('routes to unknown:true rather than a delete call when the TARGET agent has a non-string "id" (TASK-31 review)', () => {
+    // `id: 12345` (or an object/array/boolean) passes a truthiness check but
+    // is not a usable delete-call argument. Must resolve to unknown:true,
+    // not a garbage `onecli agents delete --id 12345` call.
+    for (const badId of [12345, { a: 1 }, ['x'], true]) {
+      env.exec = fakeExec({
+        'onecli agents list': {
+          ok: true,
+          stdout: JSON.stringify({ data: [{ id: badId, identifier: 'ag-doomed', name: 'Doomed' }] }),
+          stderr: '',
+        },
+      });
+      const res = findOnecliAgent(env, 'ag-doomed');
+      expect(res.agent).toBeNull();
+      expect(res.unknown).toBe(true);
+      expect(res.warnings.join()).toMatch(/missing "id"/);
+    }
+  });
+
+  it('does not poison the result when a NON-target element is missing "id" (TASK-31)', () => {
+    env.exec = fakeExec({
+      'onecli agents list': {
+        ok: true,
+        stdout: JSON.stringify({
+          data: [
+            { identifier: 'ag-someone-else', name: 'Someone Else' }, // missing id, but not our target
+            { id: 'oc-1', name: 'Doomed', identifier: 'ag-doomed' },
+          ],
+        }),
+        stderr: '',
+      },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.unknown).toBe(false);
+    expect(res.agent).toEqual({ id: 'oc-1', name: 'Doomed', identifier: 'ag-doomed' });
+  });
+
+  // Review finding (TASK-31 round 2): an element whose `identifier` cannot
+  // be read as a string carries NO positive identity at all — unlike the
+  // "someone else" case above (a real, different identifier, just missing
+  // `id`), this record cannot be ruled out as being ag-doomed's own vault
+  // agent. Silently treating it as "not a match" is the same silent-(none)
+  // failure mode this module exists to prevent.
+  it.each([
+    ['missing identifier', { name: 'Mystery' }],
+    ['non-string identifier (number)', { identifier: 1234, name: 'Mystery' }],
+    ['null identifier', { identifier: null, name: 'Mystery' }],
+    ['bare object with no identifying fields', {}],
+  ])('flags "could not check" for an element with %s (TASK-31 review)', (_label, element) => {
+    env.exec = fakeExec({
+      'onecli agents list': {
+        ok: true,
+        stdout: JSON.stringify({ data: [element] }),
+        stderr: '',
+      },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/no usable "identifier"/);
+  });
 });
 
 describe('onecliIdentifier', () => {
