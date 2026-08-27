@@ -314,6 +314,23 @@ describe('findImageTags', () => {
     expect(res).toEqual({ tags: ['nanoclaw-agent-v2-testslug:ag-doomed'], unknown: false, warnings: [] });
   });
 
+  // A registry with an explicit port puts a second `:` in a *legitimate*
+  // reference. Rejecting it would set unknown and drive an exit 2 on a
+  // teardown that should have succeeded — a false positive, the failure
+  // direction a positive allowlist introduces.
+  it('does not treat a port-qualified registry reference as garbage', () => {
+    env.exec = fakeExec({
+      'docker images': {
+        ok: true,
+        stdout: 'localhost:5000/nanoclaw-agent-v2-testslug:ag-doomed\n',
+        stderr: '',
+      },
+    });
+    const res = findImageTags(env, 'ag-doomed', null);
+    expect(res.unknown).toBe(false);
+    expect(res.warnings).toEqual([]);
+  });
+
   // TASK-30 round 2 — see the equivalent findContainers block above for the
   // apple-container-json rationale. Both fixtures are whitespace-free, so the
   // old `looksLikeTableRow` negative check let them silently read as "no tag".

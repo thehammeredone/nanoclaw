@@ -559,12 +559,13 @@ function splitTemplateLines(stdout: string): string[] {
 const CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._/@-]*$/;
 
 /**
- * Shape of a single `{{.Repository}}:{{.Tag}}` token: two `:`-free,
- * whitespace-free segments (registry paths may add `/`-separated
- * components) joined by exactly one `:`. Passes `<none>:<none>` and
- * registry-qualified refs (`ghcr.io/org/img:tag`).
+ * Shape of a single `{{.Repository}}:{{.Tag}}` token: a whitespace-free
+ * repository (whose first `/`-separated component may carry a `:port`)
+ * joined to a `:`-free tag by the final `:`. Passes `<none>:<none>`,
+ * registry-qualified refs (`ghcr.io/org/img:tag`) and refs against a
+ * registry with an explicit port (`localhost:5000/org/img:tag`).
  */
-const IMAGE_REF_RE = /^[^\s:]+(?:\/[^\s:]+)*:[^\s:]+$/;
+const IMAGE_REF_RE = /^[^\s:]+(?::\d+)?(?:\/[^\s:]+)*:[^\s:]+$/;
 
 /**
  * Running container names belonging to this group. `nanoclaw-v2-<folder>-<ts>`.
