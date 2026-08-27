@@ -149,10 +149,13 @@ pnpm exec tsx scripts/q.ts data/v2.db \
 #   identifier = agentGroup.id            if agentGroup.id starts with a letter
 #              = "ag-" + agentGroup.id    otherwise (OneCLI requires identifiers to start with a letter)
 # The match also accepts the raw unprefixed agent_groups id, not only the `ag-`-prefixed form —
-# mirrors src/teardown/agent-group-teardown.ts:654-655 (a legacy unprefixed agent is a match, not
+# mirrors src/teardown/agent-group-teardown.ts:761 (a legacy unprefixed agent is a match, not
 # an orphan). "default" is the built-in agent (no agent group, not an orphan by design) — matched
 # by the `isDefault` flag onecli reports, not by the string "default"
-# (src/teardown/agent-group-teardown.ts:657: an agent merely *named* "default" is not the built-in).
+# (src/teardown/agent-group-teardown.ts:763: an agent merely *named* "default" is not the built-in).
+# NOTE: this recipe's own `a["identifier"]` lookup does not have TASK-31's element-level shape
+# guard (findOnecliAgent does) — a null/scalar element in the array throws here instead of
+# resolving to UNKNOWN. Known gap in this ad-hoc script, not in the teardown code path.
 # An agent_groups row with no matching identifier is normal too — it just never spawned a container yet.
 #
 # Three outcomes, three exit codes — never conflate "no orphans" with "couldn't check":
@@ -161,7 +164,7 @@ pnpm exec tsx scripts/q.ts data/v2.db \
 #   UNKNOWN (2)       — onecli missing/non-zero exit, unparseable output, output that doesn't
 #                       parse to the expected shape, or a failing/empty scripts/q.ts query.
 #                       Mirrors findOnecliAgent's absent-vs-unknown split
-#                       (src/teardown/agent-group-teardown.ts:611-666): "no orphans" and
+#                       (src/teardown/agent-group-teardown.ts:691-798): "no orphans" and
 #                       "couldn't tell" must never be printed (or exit-coded) the same way.
 #                       Note the `--fields` projection below returns a bare JSON array, not the
 #                       unfiltered call's `{"data": [...]}` envelope — the shape check matches that.
@@ -195,7 +198,7 @@ if groups_rc != 0 or not groups_tsv.strip():
 groups = [line.split("|", 1) for line in groups_tsv.strip().splitlines() if line.strip()]
 
 def acceptable_identifiers(gid):
-    # Mirrors findOnecliAgent's match rule (agent-group-teardown.ts:654-655): accepts
+    # Mirrors findOnecliAgent's match rule (agent-group-teardown.ts:761): accepts
     # the `ag-`-prefixed form AND the raw unprefixed id (legacy agents may use either).
     prefixed = gid if re.match(r'^[a-zA-Z]', gid) else f"ag-{gid}"
     return {prefixed, gid}
@@ -350,7 +353,7 @@ Note the interaction with the CLAUDE.md gotcha "Gotcha: auto-created agents star
 
 ### Vault-agent orphans: where the guarantee now lives
 
-TASK-14 added, and TASK-29 hardened, deletion of the OneCLI vault agent as **step 10** of `scripts/delete-agent-group.ts` teardown (`src/teardown/agent-group-teardown.ts`, `onecliAgent` deletion around line 1020-1023: `onecli agents delete --id <id>`, removing the agent and its secret assignments — shared vault secrets themselves survive). Critically, the tool does not just skip this step silently when it can't confirm: `findOnecliAgent` (`src/teardown/agent-group-teardown.ts:624-666`) treats a failed exec, unparseable JSON, or an unexpected response shape from `onecli agents list` as `unknown: true`, distinct from "no vault agent exists" (`agent: null`). That propagates to the plan's `onecliUnknown` flag, which `collectIncomplete` (`scripts/delete-agent-group.ts:153`) surfaces as an incomplete-teardown line, driving `process.exit(2)` — "executed but incomplete" — rather than a silent exit 0. So a run that can't verify the vault-agent state cannot report success.
+TASK-14 added, TASK-29 hardened, and TASK-31 hardened one level deeper, deletion of the OneCLI vault agent as **step 10** of `scripts/delete-agent-group.ts` teardown (`src/teardown/agent-group-teardown.ts`, `onecliAgent` deletion around line 1152-1153: `onecli agents delete --id <id>`, removing the agent and its secret assignments — shared vault secrets themselves survive). Critically, the tool does not just skip this step silently when it can't confirm: `findOnecliAgent` (`src/teardown/agent-group-teardown.ts:691-798`) treats a failed exec, unparseable JSON, an unexpected top-level response shape, a non-object element inside an otherwise well-shaped `data` array, or (TASK-31) the matched element itself missing `id`, all as `unknown: true`, distinct from "no vault agent exists" (`agent: null`). That propagates to the plan's `onecliUnknown` flag, which `collectIncomplete` (`scripts/delete-agent-group.ts:156`) surfaces as an incomplete-teardown line, driving `process.exit(2)` — "executed but incomplete" — rather than a silent exit 0. So a run that can't verify the vault-agent state cannot report success.
 
 Net effect: the orphan class this task was filed against is now closed **at the source** — a group deleted through the standard teardown path cannot leave its vault agent behind without also leaving a nonzero exit code. The reconcile snippet above is a **backstop** (catches manual `ncl groups delete` on an unwired group, `onecli` outages during a past teardown, or drift from before TASK-14 existed) rather than the primary control.
 

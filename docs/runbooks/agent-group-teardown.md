@@ -238,7 +238,15 @@ caller.
   that `JSON.parse` cannot handle, or valid JSON that is not the expected
   `{ data: [...] }` shape (a bare array, a scalar, `null`, `{"data":{}}`) —
   that is discovery failing just as surely as a non-zero exit, so it is
-  `(COULD NOT CHECK …)` too, not `(none)`. It also covers `<runtime> ps`/`images`
+  `(COULD NOT CHECK …)` too, not `(none)`. The guard reaches one level deeper
+  too (TASK-31): a `data` array that is well-shaped at the top level can still
+  contain a `null` or scalar element, which either throws out of the element
+  lookup or silently reads as "not this agent" — either way flips the result
+  to `(COULD NOT CHECK …)`. An element that matches this group's identifier
+  but is missing `id` gets the same treatment (a missing `id` there means
+  discovery genuinely failed for *this* agent, not that it's absent) — a
+  missing `id` on some *other* agent's entry is left alone, since it isn't
+  the record this teardown needs. It also covers `<runtime> ps`/`images`
   exiting 0 with something other than the requested `--format` output — a
   human-readable table, or compact JSON (a runtime whose `--format` flag takes
   `json|table` rather than a Go template, e.g. Apple Container, is at least as
