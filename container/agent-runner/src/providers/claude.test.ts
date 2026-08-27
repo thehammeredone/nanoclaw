@@ -149,6 +149,27 @@ describe('ClaudeProvider.archiveSession (rollover archiving)', () => {
     expect(fs.statSync(filePath).mtimeMs).toBe(originalMtime);
   });
 
+  it('idempotent across days: a pre-existing rollover file for this session (any date) blocks a re-archive', async () => {
+    // Reproduces the AC#2 defect: poll-loop's rollover clears the in-memory
+    // continuation but not the persisted one, so a fresh query that dies
+    // before `init` restores the same session id and a LATER day's rollover
+    // re-archives it. The guard must key on session id alone, not
+    // id+date — so a file written under yesterday's date must still block
+    // today's write for the same session.
+    writeFixtureTranscript(SESSION_ID);
+    const conversationsDir = path.join(cwd, 'conversations');
+    fs.mkdirSync(conversationsDir, { recursive: true });
+    const yesterdayFilename = `2026-08-26-rollover-${SESSION_ID}.md`;
+    fs.writeFileSync(path.join(conversationsDir, yesterdayFilename), '# Conversation\n\nyesterday content\n');
+
+    const provider = new ClaudeProvider({});
+    await provider.archiveSession(SESSION_ID, cwd);
+
+    const files = conversationsFiles();
+    expect(files).toEqual([yesterdayFilename]);
+    expect(fs.readFileSync(path.join(conversationsDir, yesterdayFilename), 'utf-8')).toContain('yesterday content');
+  });
+
   it('never throws when the session id has no matching transcript', async () => {
     const provider = new ClaudeProvider({});
     // No fixture written for this id.

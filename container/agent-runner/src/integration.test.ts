@@ -448,6 +448,34 @@ describe('poll loop — /clear command', () => {
 
     await loopPromise.catch(() => {});
   });
+
+  it('TASK-28: archives the outgoing continuation before dropping it', async () => {
+    setContinuation('mock', 'S1-old-transcript');
+
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+         VALUES ('m-clear', 'chat', datetime('now'), 'pending', 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ text: '/clear' }));
+
+    const provider = new RecordingProvider('S2-unused', () => '<message to="discord-test">should not run</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    // /clear must not have started a query at all...
+    expect(provider.continuations).toEqual([]);
+    // ...but it must have archived the transcript it was about to discard,
+    // same as the daily-rollover seam. Losing this on /clear is exactly the
+    // transcript loss the archiver exists to prevent.
+    expect(provider.archiveCalls).toEqual([{ continuation: 'S1-old-transcript', cwd: '/tmp' }]);
+    expect(getContinuation('mock')).toBeUndefined();
+
+    await loopPromise.catch(() => {});
+  });
 });
 
 describe('poll loop — task-fresh session rollover', () => {
