@@ -1,9 +1,11 @@
 ---
 id: TASK-30
 title: 'Teardown: container-runtime --format output is trusted without validation'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-22 14:53'
+updated_date: '2026-08-27 05:39'
 labels: []
 dependencies: []
 ordinal: 30000
