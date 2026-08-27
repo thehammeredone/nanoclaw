@@ -431,6 +431,67 @@ describe('findOnecliAgent', () => {
     expect(res.unknown).toBe(true);
     expect(res.warnings.join()).toMatch(/unexpected onecli agents list shape/);
   });
+
+  // TASK-31: the top-level guard above trusts every element inside a
+  // well-formed `data` array. A `null` element throws out of the `.find`
+  // predicate (`a.identifier`) the same uncaught-exception-mis-surfaced-as-
+  // exit-1 way TASK-29 closed at the top level, one layer deeper.
+
+  it('flags "could not check" for a null element instead of throwing (TASK-31)', () => {
+    env.exec = fakeExec({ 'onecli agents list': { ok: true, stdout: JSON.stringify({ data: [null] }), stderr: '' } });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list element shape/);
+  });
+
+  it('flags "could not check" for a scalar element instead of silently treating it as a non-match (TASK-31)', () => {
+    env.exec = fakeExec({
+      'onecli agents list': { ok: true, stdout: JSON.stringify({ data: ['not-an-agent'] }), stderr: '' },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/unexpected onecli agents list element shape/);
+  });
+
+  it('routes to unknown:true rather than a delete call with an undefined id when the TARGET agent is missing "id" (TASK-31)', () => {
+    // identifier-only match: this element genuinely IS ag-doomed's vault
+    // agent, just missing "id". Skipping it with a warning would report a
+    // clean teardown while the live vault agent (with its injectable
+    // credentials) survives untouched — the same silent-(none) failure mode
+    // this module exists to prevent. So this must be unknown:true, not a
+    // skip.
+    env.exec = fakeExec({
+      'onecli agents list': {
+        ok: true,
+        stdout: JSON.stringify({ data: [{ identifier: 'ag-doomed', name: 'Doomed' }] }),
+        stderr: '',
+      },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/missing "id"/);
+  });
+
+  it('does not poison the result when a NON-target element is missing "id" (TASK-31)', () => {
+    env.exec = fakeExec({
+      'onecli agents list': {
+        ok: true,
+        stdout: JSON.stringify({
+          data: [
+            { identifier: 'ag-someone-else', name: 'Someone Else' }, // missing id, but not our target
+            { id: 'oc-1', name: 'Doomed', identifier: 'ag-doomed' },
+          ],
+        }),
+        stderr: '',
+      },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.unknown).toBe(false);
+    expect(res.agent).toEqual({ id: 'oc-1', name: 'Doomed', identifier: 'ag-doomed' });
+  });
 });
 
 describe('onecliIdentifier', () => {

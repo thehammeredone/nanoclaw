@@ -693,13 +693,20 @@ export function onecliIdentifier(agentGroupId: string): string {
  * `onecli agents list` call itself failed, OR it exited 0 with output
  * `JSON.parse` cannot handle, OR it exited 0 with valid JSON that is not the
  * expected `{ data: [...] }` shape (e.g. a bare array, a scalar, `null`, or
- * `{ data: {} }`). All three must never be presented as "no vault agent
+ * `{ data: {} }`), OR (TASK-31) `data` is an array but contains a non-object
+ * element, OR (TASK-31) the element that matches this group's identifier is
+ * missing `id`. All of these must never be presented as "no vault agent
  * exists" — see the module header. Treating any of them as `unknown: false`
- * (or letting a shape mismatch throw out of `findOnecliAgent` uncaught) is
- * the exact residual TASK-14/TASK-29 review findings identified: a live
- * vault agent still holding injectable credentials for a deleted group,
- * behind exit 0 (or an uncaught exception mis-surfaced as exit 1) — reached
- * through a parse failure or a shape mismatch instead of an exec failure.
+ * (or letting a shape mismatch throw out of `findOnecliAgent` uncaught, or
+ * letting a match with no `id` drive a delete call with an `undefined` id)
+ * is the exact residual TASK-14/TASK-29/TASK-31 review findings identified:
+ * a live vault agent still holding injectable credentials for a deleted
+ * group, behind exit 0 (or an uncaught exception mis-surfaced as exit 1) —
+ * reached through a parse failure, a top-level shape mismatch, or (TASK-31)
+ * a per-element shape mismatch, instead of an exec failure. A malformed
+ * element that does NOT match this group's identifier is a different,
+ * lower-stakes situation — see the comment at the `match.id` check below for
+ * why only the target's own element poisons the result.
  */
 export function findOnecliAgent(
   env: TeardownEnv,
@@ -730,7 +737,26 @@ export function findOnecliAgent(
       warnings: ['unexpected onecli agents list shape: expected an object with a "data" array'],
     };
   }
-  const data = (parsed as { data: { id: string; name: string; identifier: string; isDefault?: boolean }[] }).data;
+  const rawData = (parsed as { data: unknown[] }).data;
+  // TASK-31: the top-level guard above only proves `data` is an array — its
+  // elements are still untrusted. A `null`/scalar element throws out of the
+  // `.find` predicate below (`a.identifier` on `null`) or silently reads as
+  // "not this agent" (a scalar's `.identifier` is `undefined`, no throw) —
+  // either way the same silent-(none)/uncaught-exception failure mode as the
+  // top-level shape gap. One such element poisons the WHOLE result here
+  // (unknown:true immediately), matching the `findContainers`/`findImageTags`
+  // convention above of rejecting the whole batch on one garbage line: a
+  // non-object element means the response itself is malformed, not just one
+  // record, so nothing in it can be trusted enough to search through.
+  const badElement = rawData.find((a) => a === null || typeof a !== 'object' || Array.isArray(a));
+  if (badElement !== undefined) {
+    return {
+      agent: null,
+      unknown: true,
+      warnings: [`unexpected onecli agents list element shape: expected an object, got ${JSON.stringify(badElement)}`],
+    };
+  }
+  const data = rawData as { id?: string; name?: string; identifier?: string; isDefault?: boolean }[];
   const wanted = onecliIdentifier(agentGroupId);
   const match = data.find((a) => a.identifier === wanted || a.identifier === agentGroupId);
   if (!match) return { agent: null, unknown: false, warnings: [] };
@@ -741,8 +767,34 @@ export function findOnecliAgent(
       warnings: [`refusing to touch the OneCLI default agent (${match.identifier})`],
     };
   }
+  if (!match.id) {
+    // The matched element genuinely IS this group's vault agent (its
+    // `identifier` matched) but is missing `id` — discovery failed for THIS
+    // specific agent, not for some unrelated record. Two possible outs here
+    // (AC#2): unknown:true, or skip-with-warning. Skipping would let
+    // `collectIncomplete` see `onecliAgent: null` and report a clean
+    // teardown while a live vault agent — still holding injectable
+    // credentials — survives untouched. That's exactly the silent "(none)"
+    // failure mode this module exists against, and it would also mean never
+    // issuing a delete call with an `undefined` id (AC#2's other
+    // requirement) by construction. So: unknown:true, not skip.
+    return {
+      agent: null,
+      unknown: true,
+      warnings: [`onecli agents list entry for "${match.identifier}" is missing "id" — cannot safely delete it`],
+    };
+  }
+  // A malformed element for a DIFFERENT agent (no "id", wrong/missing
+  // "identifier") never reaches here — it fails the `match` comparison above
+  // and is otherwise ignored, same as any other non-matching row. Poisoning
+  // this group's teardown over another agent's bad record would be a
+  // disproportionate blast radius for data this call never touches.
   // Deliberately drop every other field — `agents list` includes accessToken.
-  return { agent: { id: match.id, name: match.name, identifier: match.identifier }, unknown: false, warnings: [] };
+  return {
+    agent: { id: match.id, name: match.name ?? '', identifier: match.identifier ?? wanted },
+    unknown: false,
+    warnings: [],
+  };
 }
 
 // ---------------------------------------------------------------------------
