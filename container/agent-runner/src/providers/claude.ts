@@ -252,9 +252,18 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 // this writer — PreCompact's naming (a slugified compaction summary, or
 // `conversation-HHMM` when no summary is available) never produces it, so
 // the two writers can never land on the same filename or clobber each
-// other's output. Before doing any read/parse work we check whether that
-// exact file already exists; if so we skip — a second archiveSession() call
-// for the same session on the same day is an idempotent no-op, not a defect.
+// other's output.
+//
+// Idempotency is keyed on session id ALONE, not id+date: before any
+// read/parse work we scan the conversations dir for any existing
+// `*-rollover-<sessionId>.md` file, regardless of what date is in its name.
+// A same-day exact-filename check is not enough — poll-loop.ts's rollover
+// clears the in-memory continuation but does not clear the persisted one,
+// so a fresh query that dies before `init` restores the same session id
+// from the store, and the *next* day's rollover would archive it again
+// under a different filename if the guard were date-scoped. A given
+// session id must be archived at most once, ever, no matter which day (or
+// how many days later) the second attempt happens.
 
 interface RawTranscriptEntry {
   type?: string;
@@ -297,6 +306,23 @@ function parseSessionMessages(entries: SessionMessage[]): ParsedMessage[] {
 }
 
 /**
+ * Local-calendar-day date stamp (`YYYY-MM-DD`), deliberately NOT
+ * `toISOString().split('T')[0]` (which is UTC). PreCompact's filenames use
+ * UTC — a pre-existing quirk we leave alone since it isn't this writer's
+ * code — but this writer's idempotency guard no longer depends on the date
+ * matching (see the comment above), so there's no reason to inherit the
+ * UTC-vs-local mismatch: using local here keeps the rollover filename's
+ * date consistent with formatTranscriptMarkdown's local `Archived: …` body
+ * timestamp.
+ */
+function localDateStamp(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
  * Archive the transcript for `continuation` into `<cwd>/conversations/`. In
  * production `cwd` is always `/workspace/agent`, matching PreCompact's
  * hardcoded target — the cwd param exists so tests can point this at a temp
@@ -310,11 +336,10 @@ function parseSessionMessages(entries: SessionMessage[]): ParsedMessage[] {
 async function archiveSessionTranscript(continuation: string, cwd: string, assistantName?: string): Promise<void> {
   try {
     const conversationsDir = path.join(cwd, 'conversations');
-    const filename = `${new Date().toISOString().split('T')[0]}-rollover-${continuation}.md`;
-    const filePath = path.join(conversationsDir, filename);
+    const rolloverSuffix = `-rollover-${continuation}.md`;
 
-    if (fs.existsSync(filePath)) {
-      log(`archiveSession: ${filename} already archived, skipping`);
+    if (fs.existsSync(conversationsDir) && fs.readdirSync(conversationsDir).some((f) => f.endsWith(rolloverSuffix))) {
+      log(`archiveSession: session ${continuation} already archived, skipping`);
       return;
     }
 
@@ -330,8 +355,12 @@ async function archiveSessionTranscript(continuation: string, cwd: string, assis
       return;
     }
 
+    // Local date, not UTC — matches formatTranscriptMarkdown's `Archived: …`
+    // body timestamp (also local via toLocaleString), so a file's name and
+    // its contents never disagree on which calendar day it belongs to.
+    const filename = `${localDateStamp(new Date())}-rollover-${continuation}.md`;
     fs.mkdirSync(conversationsDir, { recursive: true });
-    fs.writeFileSync(filePath, formatTranscriptMarkdown(messages, null, assistantName));
+    fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, null, assistantName));
     log(`archiveSession: archived rollover session to ${filename}`);
   } catch (err) {
     log(`archiveSession: failed to archive session ${continuation}: ${err instanceof Error ? err.message : String(err)}`);

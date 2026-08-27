@@ -44,19 +44,43 @@ export function shouldRunFresh(messages: Pick<MessageInRow, 'kind'>[]): boolean 
   return messages.some((m) => m.kind === 'task');
 }
 
+// Bound on how long a rollover/`/clear` archive is allowed to run. Measured
+// 15ms on a real 404KB transcript, so this is generous headroom — it exists
+// only so a stalled bind mount (e.g. `.claude-shared`) can't turn "archive
+// never breaks the turn" into a silent multi-minute hang that a plain
+// try/catch cannot rescue.
+const ARCHIVE_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 /**
- * Best-effort archive of the transcript being dropped at daily rollover.
- * Defense-in-depth on top of each provider's own internal try/catch (see
- * AgentProvider.archiveSession in providers/types.ts) — a throwing or
- * missing implementation must never break the caller's turn, so this is
- * the single place that guarantees that regardless of provider behavior.
+ * Best-effort archive of the transcript being dropped at daily rollover (or
+ * by `/clear`). Defense-in-depth on top of each provider's own internal
+ * try/catch (see AgentProvider.archiveSession in providers/types.ts) — a
+ * throwing, hanging, or missing implementation must never break the
+ * caller's turn, so this is the single place that guarantees that
+ * regardless of provider behavior.
  */
 async function archiveOutgoingSession(provider: AgentProvider, continuation: string, cwd: string): Promise<void> {
   if (!provider.archiveSession) return;
   try {
-    await provider.archiveSession(continuation, cwd);
+    await withTimeout(Promise.resolve(provider.archiveSession(continuation, cwd)), ARCHIVE_TIMEOUT_MS, 'archiveSession');
   } catch (err) {
-    log(`archiveSession failed (continuing rollover anyway): ${err instanceof Error ? err.message : String(err)}`);
+    log(`archiveSession failed (continuing anyway): ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -145,6 +169,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     for (const msg of messages) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
         log('Clearing session (resetting continuation)');
+        // Archive before dropping, same as the daily rollover seam — /clear
+        // is a user-triggered rollover and must not lose the transcript.
+        if (continuation) {
+          await archiveOutgoingSession(config.provider, continuation, config.cwd);
+        }
         continuation = undefined;
         clearContinuation(config.providerName);
         writeMessageOut({
