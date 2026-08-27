@@ -250,6 +250,16 @@ caller.
   unpadded single-column header) through. Any line that fails its shape check
   flips the result to `unknown` rather than letting it silently fail the match
   and read as `(none)`
+
+  **Residual gap, known and unfixed.** A shape check cannot separate a
+  single-word *header* from a legitimate value, because they are the same
+  shape. `docker images`-style output is safe — `REPOSITORY` has no `:`, so it
+  fails the `repo:tag` shape — but a single-column *container* table headed
+  `NAMES` passes the container-name shape, fails the
+  `nanoclaw-v2-<folder>-<ts>` match, and still reads as `(none)` at exit 0.
+  Multi-column tables are caught either way (they carry whitespace). If a
+  future runtime is found to emit a single-column container listing, the fix
+  is a capability probe, not a stronger shape check
   (TASK-30). Otherwise an operator would approve deleting rows and session
   directories out from under a live container, or leave a vault agent still
   holding injectable credentials for a deleted group. Every one of these
