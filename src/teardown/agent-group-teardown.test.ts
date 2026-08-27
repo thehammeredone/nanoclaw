@@ -511,6 +511,31 @@ describe('findOnecliAgent', () => {
     expect(res.unknown).toBe(false);
     expect(res.agent).toEqual({ id: 'oc-1', name: 'Doomed', identifier: 'ag-doomed' });
   });
+
+  // Review finding (TASK-31 round 2): an element whose `identifier` cannot
+  // be read as a string carries NO positive identity at all — unlike the
+  // "someone else" case above (a real, different identifier, just missing
+  // `id`), this record cannot be ruled out as being ag-doomed's own vault
+  // agent. Silently treating it as "not a match" is the same silent-(none)
+  // failure mode this module exists to prevent.
+  it.each([
+    ['missing identifier', { name: 'Mystery' }],
+    ['non-string identifier (number)', { identifier: 1234, name: 'Mystery' }],
+    ['null identifier', { identifier: null, name: 'Mystery' }],
+    ['bare object with no identifying fields', {}],
+  ])('flags "could not check" for an element with %s (TASK-31 review)', (_label, element) => {
+    env.exec = fakeExec({
+      'onecli agents list': {
+        ok: true,
+        stdout: JSON.stringify({ data: [element] }),
+        stderr: '',
+      },
+    });
+    const res = findOnecliAgent(env, 'ag-doomed');
+    expect(res.agent).toBeNull();
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/no usable "identifier"/);
+  });
 });
 
 describe('onecliIdentifier', () => {

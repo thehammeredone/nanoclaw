@@ -694,19 +694,23 @@ export function onecliIdentifier(agentGroupId: string): string {
  * `JSON.parse` cannot handle, OR it exited 0 with valid JSON that is not the
  * expected `{ data: [...] }` shape (e.g. a bare array, a scalar, `null`, or
  * `{ data: {} }`), OR (TASK-31) `data` is an array but contains a non-object
- * element, OR (TASK-31) the element that matches this group's identifier is
- * missing `id`. All of these must never be presented as "no vault agent
- * exists" — see the module header. Treating any of them as `unknown: false`
- * (or letting a shape mismatch throw out of `findOnecliAgent` uncaught, or
- * letting a match with no `id` drive a delete call with an `undefined` id)
- * is the exact residual TASK-14/TASK-29/TASK-31 review findings identified:
- * a live vault agent still holding injectable credentials for a deleted
- * group, behind exit 0 (or an uncaught exception mis-surfaced as exit 1) —
- * reached through a parse failure, a top-level shape mismatch, or (TASK-31)
- * a per-element shape mismatch, instead of an exec failure. A malformed
- * element that does NOT match this group's identifier is a different,
- * lower-stakes situation — see the comment at the `match.id` check below for
- * why only the target's own element poisons the result.
+ * element, OR (TASK-31 review) an element is an object but has no readable
+ * (string) `identifier`, OR (TASK-31) the element that matches this group's
+ * identifier is missing `id` or has a non-string `id` (TASK-31 review). All
+ * of these must never be presented as "no vault agent exists" — see the
+ * module header. Treating any of them as `unknown: false` (or letting a
+ * shape mismatch throw out of `findOnecliAgent` uncaught, or letting a match
+ * with no usable `id` drive a delete call with a garbage id) is the exact
+ * residual TASK-14/TASK-29/TASK-31 review findings identified: a live vault
+ * agent still holding injectable credentials for a deleted group, behind
+ * exit 0 (or an uncaught exception mis-surfaced as exit 1) — reached through
+ * a parse failure, a top-level shape mismatch, or (TASK-31) a per-element
+ * shape or identity mismatch, instead of an exec failure. A malformed
+ * element that does NOT match this group's identifier — because it has a
+ * real, different identifier, not because its identifier is unreadable — is
+ * a different, lower-stakes situation; see the comment at the `match.id`
+ * check below for why only the target's own element poisons the result in
+ * that specific case.
  */
 export function findOnecliAgent(
   env: TeardownEnv,
@@ -747,18 +751,49 @@ export function findOnecliAgent(
   // (unknown:true immediately), matching the `findContainers`/`findImageTags`
   // convention above of rejecting the whole batch on one garbage line: a
   // non-object element means the response itself is malformed, not just one
-  // record, so nothing in it can be trusted enough to search through.
-  const badElement = rawData.find((a) => a === null || typeof a !== 'object' || Array.isArray(a));
-  if (badElement !== undefined) {
+  // record, so nothing in it can be trusted enough to search through. A
+  // second, narrower guard below catches the case where every element IS an
+  // object but one of them has no readable `identifier` — see that guard's
+  // comment for why that also has to poison the whole result rather than
+  // read as "not a match".
+  const badIndex = rawData.findIndex((a) => a === null || typeof a !== 'object' || Array.isArray(a));
+  if (badIndex !== -1) {
+    // Never interpolate the element itself into a warning — `agents list`
+    // rows carry `accessToken` (see the comment at the return below), and an
+    // array-shaped element (a columnar output form) would print a raw
+    // credential-bearing row verbatim into plan output/logs. Index + type is
+    // enough to locate the bad row without risking that.
+    const bad = rawData[badIndex];
+    const shape = bad === null ? 'null' : Array.isArray(bad) ? 'array' : typeof bad;
     return {
       agent: null,
       unknown: true,
-      warnings: [`unexpected onecli agents list element shape: expected an object, got ${JSON.stringify(badElement)}`],
+      warnings: [`unexpected onecli agents list element shape: expected an object, got ${shape} at index ${badIndex}`],
     };
   }
-  const data = rawData as { id?: string; name?: string; identifier?: string; isDefault?: boolean }[];
+  const data = rawData as { id?: string; name?: string; identifier?: unknown; isDefault?: boolean }[];
+  // TASK-31 review: an element whose `identifier` is not a string (missing,
+  // `null`, a number, …) carries no positive identity at all. Unlike a
+  // malformed element for a genuinely different, identified agent (handled
+  // below at the `match.id` check — that one is left alone as data this call
+  // never touches), a record with no readable `identifier` cannot be ruled
+  // out as being THIS group's own vault agent. Treating it as a silent
+  // non-match would be the exact silent-(none) failure mode this module
+  // exists against, so it poisons the whole result the same way a bad
+  // top-level element does.
+  const unidentifiableIndex = data.findIndex((a) => typeof a.identifier !== 'string');
+  if (unidentifiableIndex !== -1) {
+    return {
+      agent: null,
+      unknown: true,
+      warnings: [
+        `onecli agents list element at index ${unidentifiableIndex} has no usable "identifier" — cannot rule out that it is this group's vault agent`,
+      ],
+    };
+  }
+  const typedData = data as { id?: string; name?: string; identifier: string; isDefault?: boolean }[];
   const wanted = onecliIdentifier(agentGroupId);
-  const match = data.find((a) => a.identifier === wanted || a.identifier === agentGroupId);
+  const match = typedData.find((a) => a.identifier === wanted || a.identifier === agentGroupId);
   if (!match) return { agent: null, unknown: false, warnings: [] };
   if (match.isDefault) {
     return {
@@ -786,9 +821,11 @@ export function findOnecliAgent(
       warnings: [`onecli agents list entry for "${match.identifier}" is missing "id" — cannot safely delete it`],
     };
   }
-  // A malformed element for a DIFFERENT agent (no "id", wrong/missing
-  // "identifier") never reaches here — it fails the `match` comparison above
-  // and is otherwise ignored, same as any other non-matching row. Poisoning
+  // A malformed element for a DIFFERENT agent — no "id", but a real string
+  // "identifier" naming some other agent — never reaches here: it fails the
+  // `match` comparison above and is otherwise ignored, same as any other
+  // non-matching row. (An element with no readable "identifier" at all is
+  // caught earlier, above, and can't reach this point either.) Poisoning
   // this group's teardown over another agent's bad record would be a
   // disproportionate blast radius for data this call never touches.
   // Deliberately drop every other field — `agents list` includes accessToken.

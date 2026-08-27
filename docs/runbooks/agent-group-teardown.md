@@ -242,11 +242,18 @@ caller.
   too (TASK-31): a `data` array that is well-shaped at the top level can still
   contain a `null` or scalar element, which either throws out of the element
   lookup or silently reads as "not this agent" — either way flips the result
-  to `(COULD NOT CHECK …)`. An element that matches this group's identifier
-  but is missing `id` gets the same treatment (a missing `id` there means
-  discovery genuinely failed for *this* agent, not that it's absent) — a
-  missing `id` on some *other* agent's entry is left alone, since it isn't
-  the record this teardown needs. It also covers `<runtime> ps`/`images`
+  to `(COULD NOT CHECK …)`. An object element with no readable (string)
+  `identifier` gets the same treatment (TASK-31 review) — unlike a malformed
+  element for a genuinely different, identified agent, a record with no
+  usable identity can't be ruled out as being this group's own vault agent.
+  An element that matches this group's identifier but is missing `id`, or
+  has a non-string `id` (TASK-31 review — a bare truthiness check on `id`
+  let numbers/objects/arrays/`true` through to the delete call), gets the
+  same treatment (a missing/unusable `id` there means discovery genuinely
+  failed for *this* agent, not that it's absent) — a missing `id` on some
+  *other* agent's entry (one with its own real, different `identifier`) is
+  left alone, since it isn't the record this teardown needs. It also covers
+  `<runtime> ps`/`images`
   exiting 0 with something other than the requested `--format` output — a
   human-readable table, or compact JSON (a runtime whose `--format` flag takes
   `json|table` rather than a Go template, e.g. Apple Container, is at least as
@@ -279,7 +286,11 @@ caller.
   exists in `docker images`, plus a config-recorded `image_tag` when it ends in
   `:<agent-group-id>`.
 - **No secrets in output.** `onecli agents list` returns `accessToken` per agent;
-  only `id`/`name`/`identifier` ever reach the plan.
+  only `id`/`name`/`identifier` ever reach the plan. This also holds for the
+  malformed-element warnings (TASK-31 review): a bad element is reported by
+  index and type (`got array at index 2`), never by interpolating the
+  element itself — an array-shaped element (a columnar output row) could
+  otherwise print a raw `accessToken`-bearing record into plan output/logs.
 
 ---
 
