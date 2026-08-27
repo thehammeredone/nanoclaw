@@ -1,9 +1,11 @@
 ---
 id: TASK-31
 title: 'Teardown: element-level shape guard for onecli agents list entries'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@orchestrator'
 created_date: '2026-08-22 17:49'
+updated_date: '2026-08-27 06:08'
 labels: []
 dependencies: []
 ordinal: 31000
