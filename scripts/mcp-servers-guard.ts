@@ -41,13 +41,65 @@ export function isEmptyMcpServers(value: unknown): boolean {
   return value == null || (typeof value === 'object' && !Array.isArray(value) && Object.keys(value as object).length === 0);
 }
 
-/** Side-by-side JSON dump — not a line-diff, but enough for an operator to eyeball the drift. */
+/**
+ * Redaction rule (TASK-27 review, F1 — the diff used to print
+ * SKYLIGHT_PASSWORD/SKYLIGHT_EMAIL to stdout/stderr in cleartext): any object
+ * key whose name contains PASSWORD, SECRET, TOKEN, CREDENTIAL, API_KEY, or
+ * EMAIL (case-insensitive) is treated as secret-like, anywhere in the tree —
+ * not just under an `env` object, so a future MCP server config with secrets
+ * nested elsewhere is still covered. This deliberately over-redacts (e.g. it
+ * would also redact a key literally named `email` for a non-secret purpose)
+ * — better to hide a harmless value than leak a real credential.
+ *
+ * The redacted value still tells the operator whether it CHANGED, by
+ * comparing to the same key path in the other side of the diff — an operator
+ * must be able to tell "password rotated" from "password unchanged" without
+ * ever seeing either value.
+ */
+const SECRET_KEY_PATTERN = /(PASSWORD|SECRET|TOKEN|CREDENTIAL|API[_-]?KEY|EMAIL)/i;
+
+/** Recursively redact secret-looking keys in `value`, marking each as changed/unchanged relative to `other`. */
+function redactForDiff(value: unknown, other: unknown): unknown {
+  if (Array.isArray(value)) {
+    const otherArr = Array.isArray(other) ? other : [];
+    return value.map((v, i) => redactForDiff(v, otherArr[i]));
+  }
+  if (value !== null && typeof value === 'object') {
+    const otherObj = other !== null && typeof other === 'object' ? (other as Record<string, unknown>) : {};
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SECRET_KEY_PATTERN.test(k)) {
+        const changed = !isDeepStrictEqual(v, otherObj[k]);
+        result[k] = changed ? '<redacted: value differs>' : '<redacted: unchanged>';
+      } else {
+        result[k] = redactForDiff(v, otherObj[k]);
+      }
+    }
+    return result;
+  }
+  return value;
+}
+
+/**
+ * `JSON.stringify` silently drops object properties whose value is
+ * `undefined` (TASK-27 review, F3) — a replacer that materializes them as an
+ * explicit marker keeps a genuinely divergent plan from rendering two
+ * identical-looking blobs. `undefined` for the whole value (no config row at
+ * all) renders as a plain label instead of the literal string "undefined"
+ * (TASK-27 review, N3).
+ */
+function stringifyForDiff(value: unknown): string {
+  if (value === undefined) return '(no existing config)';
+  return JSON.stringify(value, (_key, v) => (v === undefined ? '<undefined>' : v), 2);
+}
+
+/** Side-by-side JSON dump — not a line-diff, but enough for an operator to eyeball the drift. Secret-looking values are redacted (see SECRET_KEY_PATTERN above). */
 export function mcpServersDiffText(existing: unknown, next: unknown): string {
   return [
     '--- stored (live) ---',
-    JSON.stringify(existing, null, 2),
+    stringifyForDiff(redactForDiff(existing, next)),
     '--- seeder would write ---',
-    JSON.stringify(next, null, 2),
+    stringifyForDiff(redactForDiff(next, existing)),
   ].join('\n');
 }
 
@@ -101,13 +153,32 @@ export function getStoredMcpServers(db: Database.Database, agentGroupId: string)
   }
 }
 
-/** Overwrite `container_configs.mcp_servers` for a group. Only call this after `planMcpServersUpdate` says 'write'. */
+/**
+ * Overwrite `container_configs.mcp_servers` for a group. Only call this after
+ * `planMcpServersUpdate` says 'write'.
+ *
+ * This duplicates the UPDATE in `updateContainerConfigJson`
+ * (src/db/container-configs.ts) rather than reusing it (TASK-27 review, F5)
+ * because that helper reads the connection singleton via `getDb()`, and this
+ * module's tests use a throwaway fixture `Database` handle that is never
+ * registered as the singleton — an explicit `db` parameter is what makes the
+ * hermetic tests possible. Two copies of the same SQL can drift; if a future
+ * migration changes what a JSON-column write must touch, update both.
+ *
+ * Throws (TASK-27 review, F6) instead of silently no-op'ing when no row
+ * matches `agentGroupId` — `ensureContainerConfig` is expected to have run
+ * first, and a caller that skips it deserves a loud failure, not a write
+ * that looks like it happened but didn't.
+ */
 export function writeMcpServers(db: Database.Database, agentGroupId: string, value: unknown): void {
-  db.prepare('UPDATE container_configs SET mcp_servers = ?, updated_at = ? WHERE agent_group_id = ?').run(
-    JSON.stringify(value),
-    new Date().toISOString(),
-    agentGroupId,
-  );
+  const result = db
+    .prepare('UPDATE container_configs SET mcp_servers = ?, updated_at = ? WHERE agent_group_id = ?')
+    .run(JSON.stringify(value), new Date().toISOString(), agentGroupId);
+  if (result.changes !== 1) {
+    throw new Error(
+      `writeMcpServers: no container_configs row for agent group ${agentGroupId} (expected ensureContainerConfig to have run first)`,
+    );
+  }
 }
 
 /**

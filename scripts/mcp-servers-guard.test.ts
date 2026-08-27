@@ -113,6 +113,46 @@ describe('mcpServersDiffText', () => {
     expect(text).toContain('"a": 1');
     expect(text).toContain('"a": 2');
   });
+
+  it('renders "(no existing config)" instead of the literal string "undefined" when there is no stored row', () => {
+    const text = mcpServersDiffText(undefined, { a: 1 });
+    expect(text).toContain('(no existing config)');
+    expect(text).not.toMatch(/---\s*\nundefined/);
+  });
+
+  it('redacts secret-looking env keys instead of printing their raw values (F1, CRITICAL)', () => {
+    const existing = { skylight: { env: { SKYLIGHT_PASSWORD: 'hunter2', SKYLIGHT_EMAIL: 'a@example.com' } } };
+    const next = { skylight: { env: { SKYLIGHT_PASSWORD: 'hunter2', SKYLIGHT_EMAIL: 'a@example.com' } } };
+    const text = mcpServersDiffText(existing, next);
+    expect(text).not.toContain('hunter2');
+    expect(text).not.toContain('a@example.com');
+    // key names still visible so an operator can see WHICH keys are secret
+    expect(text).toContain('SKYLIGHT_PASSWORD');
+    expect(text).toContain('SKYLIGHT_EMAIL');
+  });
+
+  it('marks a redacted value as changed vs unchanged without revealing either value', () => {
+    const existing = { skylight: { env: { SKYLIGHT_PASSWORD: 'old-secret', SKYLIGHT_TOKEN: 'same-secret-token' } } };
+    const next = { skylight: { env: { SKYLIGHT_PASSWORD: 'new-secret', SKYLIGHT_TOKEN: 'same-secret-token' } } };
+    const text = mcpServersDiffText(existing, next);
+    expect(text).not.toContain('old-secret');
+    expect(text).not.toContain('new-secret');
+    expect(text).not.toContain('same-secret-token');
+    expect(text).toContain('<redacted: value differs>');
+    expect(text).toContain('<redacted: unchanged>');
+  });
+
+  it('renders an undefined-vs-missing divergence visibly instead of both sides collapsing to nothing (F3)', () => {
+    const existing = { a: { b: 1 } };
+    const next = { a: { b: 1, u: undefined } };
+    // The plan itself must still see these as different...
+    expect(planMcpServersUpdate({ existing, next, force: false, dryRun: false }).kind).toBe('needs-confirmation');
+    // ...and the rendered diff must show why, not print two identical blobs.
+    const text = mcpServersDiffText(existing, next);
+    const [stored, wouldWrite] = text.split('--- seeder would write ---');
+    expect(stored).not.toEqual(wouldWrite);
+    expect(wouldWrite).toContain('<undefined>');
+  });
 });
 
 describe('getStoredMcpServers / writeMcpServers (hermetic fixture DB)', () => {
@@ -148,12 +188,37 @@ describe('getStoredMcpServers / writeMcpServers (hermetic fixture DB)', () => {
 
     expect(plan.kind).toBe('needs-confirmation');
 
-    // Simulate the caller's non-interactive refusal path: it must NOT call writeMcpServers
-    // for a 'needs-confirmation' plan. Assert the row is byte-for-byte untouched.
-    const row = db.prepare('SELECT mcp_servers FROM container_configs WHERE agent_group_id = ?').get('ag-fixture') as {
+    // Capture the row BEFORE deciding not to call writeMcpServers, so the
+    // "unchanged" assertion below is comparing to a real snapshot rather than
+    // to `drifted` (which would pass even if the row were never written in
+    // the first place — a prior version of this test could not fail).
+    const rowBefore = db.prepare('SELECT mcp_servers FROM container_configs WHERE agent_group_id = ?').get('ag-fixture') as {
       mcp_servers: string;
     };
-    expect(JSON.parse(row.mcp_servers)).toEqual(drifted);
+
+    // Simulate the caller's non-interactive refusal path: it must NOT call writeMcpServers
+    // for a 'needs-confirmation' plan.
+    // (deliberately not calling writeMcpServers here)
+
+    const rowAfter = db.prepare('SELECT mcp_servers FROM container_configs WHERE agent_group_id = ?').get('ag-fixture') as {
+      mcp_servers: string;
+    };
+    expect(rowAfter.mcp_servers).toBe(rowBefore.mcp_servers);
+    expect(JSON.parse(rowAfter.mcp_servers)).toEqual(drifted);
+
+    // Prove the assertion above is real: writing WOULD have changed the row.
+    writeMcpServers(db, 'ag-fixture', next);
+    const rowIfWritten = db.prepare('SELECT mcp_servers FROM container_configs WHERE agent_group_id = ?').get('ag-fixture') as {
+      mcp_servers: string;
+    };
+    expect(rowIfWritten.mcp_servers).not.toBe(rowBefore.mcp_servers);
+    db.close();
+  });
+
+  it('writeMcpServers throws loudly instead of silently no-op-ing when the row does not exist (F6)', () => {
+    const { db, path: p } = makeFixtureDb('{}');
+    tmpPath = p;
+    expect(() => writeMcpServers(db, 'ag-does-not-exist', { skylight: {} })).toThrow(/no container_configs row/);
     db.close();
   });
 
