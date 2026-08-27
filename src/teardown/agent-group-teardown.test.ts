@@ -475,6 +475,25 @@ describe('findOnecliAgent', () => {
     expect(res.warnings.join()).toMatch(/missing "id"/);
   });
 
+  it('routes to unknown:true rather than a delete call when the TARGET agent has a non-string "id" (TASK-31 review)', () => {
+    // `id: 12345` (or an object/array/boolean) passes a truthiness check but
+    // is not a usable delete-call argument. Must resolve to unknown:true,
+    // not a garbage `onecli agents delete --id 12345` call.
+    for (const badId of [12345, { a: 1 }, ['x'], true]) {
+      env.exec = fakeExec({
+        'onecli agents list': {
+          ok: true,
+          stdout: JSON.stringify({ data: [{ id: badId, identifier: 'ag-doomed', name: 'Doomed' }] }),
+          stderr: '',
+        },
+      });
+      const res = findOnecliAgent(env, 'ag-doomed');
+      expect(res.agent).toBeNull();
+      expect(res.unknown).toBe(true);
+      expect(res.warnings.join()).toMatch(/missing "id"/);
+    }
+  });
+
   it('does not poison the result when a NON-target element is missing "id" (TASK-31)', () => {
     env.exec = fakeExec({
       'onecli agents list': {

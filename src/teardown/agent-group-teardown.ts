@@ -767,17 +767,19 @@ export function findOnecliAgent(
       warnings: [`refusing to touch the OneCLI default agent (${match.identifier})`],
     };
   }
-  if (!match.id) {
+  if (typeof match.id !== 'string' || !match.id) {
     // The matched element genuinely IS this group's vault agent (its
-    // `identifier` matched) but is missing `id` — discovery failed for THIS
-    // specific agent, not for some unrelated record. Two possible outs here
-    // (AC#2): unknown:true, or skip-with-warning. Skipping would let
-    // `collectIncomplete` see `onecliAgent: null` and report a clean
-    // teardown while a live vault agent — still holding injectable
-    // credentials — survives untouched. That's exactly the silent "(none)"
-    // failure mode this module exists against, and it would also mean never
-    // issuing a delete call with an `undefined` id (AC#2's other
-    // requirement) by construction. So: unknown:true, not skip.
+    // `identifier` matched) but `id` is missing, empty, or not a string
+    // (`12345`, `{}`, `['x']`, `true` all pass a bare truthiness check) —
+    // discovery failed for THIS specific agent, not for some unrelated
+    // record. Two possible outs here (AC#2): unknown:true, or
+    // skip-with-warning. Skipping would let `collectIncomplete` see
+    // `onecliAgent: null` and report a clean teardown while a live vault
+    // agent — still holding injectable credentials — survives untouched.
+    // That's exactly the silent "(none)" failure mode this module exists
+    // against, and it would also mean never issuing a delete call with a
+    // garbage `id` (AC#2's other requirement) by construction. So:
+    // unknown:true, not skip.
     return {
       agent: null,
       unknown: true,
