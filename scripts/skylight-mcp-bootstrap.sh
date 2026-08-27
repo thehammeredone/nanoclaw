@@ -16,8 +16,12 @@
 # this file, but only when run with SKYLIGHT_LIVE_DB_CHECK=1 (see
 # docs/runbooks/aurora-skylight-mcp.md) — the default `pnpm test` is hermetic
 # and only checks that this file, the seeder, and the runbook agree with each
-# other, not the live DB. Change this file, re-run the seeder, restart the
-# group.
+# other, not the live DB. To change this file: edit it, then
+# `pnpm exec tsx scripts/setup-aurora-agent.ts --dry-run` to preview the
+# resulting mcp_servers diff, then `... --force` to write it, then restart
+# the group. A bare re-run (no flags) after editing this file will always
+# find mcp_servers divergent and, non-interactively, exit 1 without writing
+# anything (TASK-27) — see "Bumping the Skylight wheel" in the runbook.
 #
 # Constraints this file must respect (the loader enforces the first three):
 #   - No `#` outside the leading comment block, and no inline comments: after

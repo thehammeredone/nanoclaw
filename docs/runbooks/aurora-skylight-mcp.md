@@ -67,7 +67,11 @@ doesn't go red because of an unrelated live-patch:
 SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts
 ```
 
-To change the bootstrap: edit the `.sh`, re-run the seeder, restart the group.
+To change the bootstrap: edit the `.sh`, then run `pnpm exec tsx scripts/setup-aurora-agent.ts --dry-run`
+to preview the resulting diff, then `pnpm exec tsx scripts/setup-aurora-agent.ts --force` to write it, then
+restart the group. A bare re-run (no flags) after editing the `.sh` will always find `mcp_servers` divergent
+and, non-interactively, exit 1 without writing anything (TASK-27) — see "Bumping the Skylight wheel" below
+for the full recipe.
 
 The Skylight credentials are *not* in that line — they are separate keys (`SKYLIGHT_EMAIL`,
 `SKYLIGHT_PASSWORD`, `SKYLIGHT_FRAME_ID`) on the sibling `env` object, which is deliberately
@@ -331,7 +335,7 @@ it's still easier to fix the dotfiles first than to puzzle over the diff mid-pro
 cd /home/hammer/git/nanoclaw-v2
 sed -i 's/^VER=0.2.2;$/VER=0.2.3;/' scripts/skylight-mcp-bootstrap.sh
 SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts   # red until the seeder runs — that is the point
-pnpm exec tsx scripts/setup-aurora-agent.ts --dry-run                      # review the diff: only args[1] (the VER bump) should differ
+pnpm exec tsx scripts/setup-aurora-agent.ts --dry-run                      # review the diff (see below for what to check)
 pnpm exec tsx scripts/setup-aurora-agent.ts --force                        # rewrites mcp_servers from the script
 SKYLIGHT_LIVE_DB_CHECK=1 pnpm test scripts/skylight-mcp-bootstrap.test.ts   # green: DB and script agree again
 ncl groups restart --id ag-1782273071167-th1q6f --message "Verify the Skylight MCP works: call authenticate, then list today's chores."
@@ -342,11 +346,29 @@ writing, `scripts/mcp-servers-guard.ts` diffs the stored value against what it's
 write. If they differ (which they always will right after the `VER=` edit above — that's
 expected), it prints the diff and either prompts for confirmation (interactive terminal) or
 refuses outright and asks for `--force` (non-interactive — e.g. run by an agent, or piped).
-`--dry-run` on its own prints the diff without writing or prompting, which is why the recipe
-above runs it first: **the diff should show only the `args[1]` line changing.** If it shows
-anything else (an env key you don't recognize, a different frame id/email), stop — that means
-the live row has hand-tuned state, or the dotfile check above was skipped or disagreed, and
-`--force` would discard it. Reconcile before forcing.
+`--dry-run` writes nothing at all — not `mcp_servers`, not the agent group, not the group
+filesystem, not `packages_apt`/`additional_mounts` — it only prints the diff, which is why the
+recipe above runs it first.
+
+**What the diff actually looks like, and what to check.** `mcpServersDiffText` prints two full
+JSON dumps (`--- stored (live) ---` / `--- seeder would write ---`), not a line-level diff —
+`args[1]` is a single ~1.5KB escaped string (the whole bootstrap one-liner), so you cannot
+eyeball "only the VER bump changed" inside it the way you would a real diff. Secret-looking
+`env` keys (`SKYLIGHT_PASSWORD`, `SKYLIGHT_EMAIL`, etc.) are redacted to `<redacted: value
+differs>` or `<redacted: unchanged>` — never printed in the clear. What to check instead:
+
+- Under `env`, every key should render `<redacted: unchanged>` except when you deliberately
+  rotated a credential in the dotfiles (see the frame-id check above) — anything else means
+  the live row has hand-tuned state you don't expect to touch.
+- The `args` string differing is expected (that's the `VER=` bump landing); there's no cheap
+  way to confirm nothing *else* inside that string changed besides re-reading the `.sh` diff
+  you just made with `git diff scripts/skylight-mcp-bootstrap.sh`.
+- Any other top-level key inside `skylight` (a `command` change, a wholly new key) is
+  unexpected — stop and reconcile before forcing.
+
+If anything above looks wrong, stop — that means the live row has hand-tuned state, or the
+dotfile check above was skipped or disagreed, and `--force` would discard it. Reconcile before
+forcing.
 
 No `--rebuild` needed — the wheel is installed at MCP launch, not baked into the image.
 
