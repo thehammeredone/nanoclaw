@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@orchestrator'
 created_date: '2026-08-20 23:07'
-updated_date: '2026-08-26 19:03'
+updated_date: '2026-08-27 00:18'
 labels:
   - aurora
   - skylight
@@ -47,4 +47,14 @@ The GENERAL defect this task is actually about is UNCHANGED and still open: upda
 Shape chosen for the general defect: diff-and-confirm by default, --force to skip the prompt, --dry-run to preview. Non-interactive safety is handled by checking process.stdin.isTTY -- a non-TTY run takes the refuse branch without reading stdin, so it cannot hang under automation. Core logic is a pure no-I/O decision function planMcpServersUpdate() in the new scripts/mcp-servers-guard.ts, tested hermetically against a fixture DB (15 tests) rather than the real data/v2.db.
 
 FOLLOW-UP TO FILE once this merges (AC#5 finding, deliberately out of scope here): the same unconditional wholesale-overwrite pattern survives unprotected in TWO more call sites in the very same file -- scripts/setup-aurora-agent.ts:177 (packages_apt) and :182 (additional_mounts), both via updateContainerConfigJson. So re-running the seeder is still not fully safe: mcp_servers is now guarded but hand-tuned apt packages and mounts are still clobbered silently. The implementer checked the rest of the tree: no other script under scripts/ has the defect, and src/modules/self-mod/apply.ts and src/cli/resources/groups.ts already read-then-merge.
+
+2026-08-26 orchestrator review gate: spec initially FAILED AC#4 (the runbook and the .sh header still told operators to bare-re-run the seeder, which after this change always diverges and exits 1 non-interactively); code quality CHANGES REQUESTED with 1 Critical, 5 Important, 5 Minor. All fixed in one round (f67fc947, d7dc32f0, da975b0f) and independently delta-verified by execution, not by report -- no regressions.
+
+Two findings worth remembering:
+- CRITICAL, credential leak: the diff an operator reads before confirming an overwrite printed SKYLIGHT_PASSWORD and SKYLIGHT_EMAIL in cleartext, to stdout on --dry-run, to the prompt, and to stderr on the non-TTY refusal -- i.e. into terminal scrollback and any CI log. Now redacted by key pattern, rendering '<redacted: value differs>' vs '<redacted: unchanged>' so an operator can still tell a rotated secret from an untouched one without seeing either. The orchestrator widened the pattern afterwards (PASSWD/PWD/AUTH/COOKIE/SESSION/PRIVATE_KEY/SIGNATURE) because the delta-verifier proved those key names still printed in cleartext; none appear in today's payload, so this was pre-emptive.
+- The original guard was correct but ran too late: both the refusal and --dry-run paths returned only AFTER the agent group, the group filesystem, ~/.config/nanoclaw/mount-allowlist.json, the config row, packages_apt and additional_mounts had already been written. 'Refused, nothing changed' was false, and on a fresh DB --dry-run created the group with mcp_servers left at '{}'. The decision is now computed before any mutating step.
+
+Caller coverage was nil at review time -- deleting the early return on the refusal path let it fall through to the success banner with all tests still green. decideSeederOutcome (pure) and runSeeder (dependency-injected) were extracted and scripts/setup-aurora-agent.test.ts added; the delta-verifier re-applied that exact regression and confirmed the suite now goes red. The import.meta.url entry-point guard was verified by execution (running the script directly still reaches main()), since a wrong guard would have silently turned the seeder into a no-op.
+
+pnpm test 472 passed / 1 skipped. data/v2.db md5 and ~/.config/nanoclaw/mount-allowlist.json md5 both unchanged throughout; the seeder was never run against real state; Aurora's 06:00 job untouched.
 <!-- SECTION:NOTES:END -->
