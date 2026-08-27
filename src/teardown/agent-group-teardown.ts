@@ -53,14 +53,32 @@
  *    surfaced as `(COULD NOT CHECK)` for containers, images AND the OneCLI
  *    agent, and all three are counted in `collectIncomplete` so the exit code
  *    reflects it too. This includes an exec that *succeeds* but returns
- *    output that cannot be parsed or is not the expected shape (TASK-29,
- *    round 2) — `findOnecliAgent` treats a `JSON.parse` failure, a
+ *    output that cannot be parsed or is not the expected shape. For
+ *    `findOnecliAgent` (TASK-29, round 2) that means a `JSON.parse` failure, a
  *    well-formed-but-unexpected value (a bare array, a scalar, `null`,
- *    `{"data":{}}`), and an exec failure all the same way, because each
- *    reaches the same dangerous end state behind exit 0: a live vault agent
- *    reported as `(none)`. `findImageTags` has no equivalent parse step (its
- *    output is plain text, not JSON) so it does not share the gap — see its
- *    docstring.
+ *    `{"data":{}}`), and an exec failure are all treated the same way, because
+ *    each reaches the same dangerous end state behind exit 0: a live vault
+ *    agent reported as `(none)`. `findImageTags` and `findContainers` share
+ *    the same underlying risk one level down: a runtime that ignores
+ *    `--format` and exits 0 with something else entirely — a human-readable
+ *    table, OR (TASK-30 round 2) compact JSON, which is at least as likely a
+ *    fallback shape: `origin/skill/apple-container` rewrites orphan cleanup
+ *    to `container ls --format json` + `JSON.parse`, i.e. that runtime's
+ *    `--format` flag takes `json|table`, not a Go template. Every line of
+ *    either shape then fails the exact-tag-membership check (`findImageTags`)
+ *    or the `^nanoclaw-v2-<folder>-\d+$` regex (`findContainers`), which is
+ *    indistinguishable from "checked, nothing found" — the same silent-(none)-
+ *    behind-exit-0 shape as the onecli case, reached through a malformed
+ *    *shape* instead of a parse exception. A negative check keyed on internal
+ *    whitespace (the round-1 fix) only catches the table shape — compact JSON
+ *    and an unpadded single-column header are both whitespace-free and sail
+ *    straight through it. Both filters instead validate the POSITIVE shape a
+ *    valid line must have — `CONTAINER_NAME_RE` / `IMAGE_REF_RE`, applied via
+ *    the shared `splitTemplateLines` — before the match/membership step; any
+ *    line that fails is treated exactly like a discovery failure
+ *    (`unknown: true`), never filtered out or merely logged. See their
+ *    docstrings for why an output-form sanity check was used instead of a
+ *    runtime capability probe.
  *
  * See `docs/runbooks/agent-group-teardown.md` for the operator-facing runbook
  * and the full deletion order with FK evidence.
@@ -519,10 +537,44 @@ export function findOrphans(
 // ---------------------------------------------------------------------------
 
 /**
+ * Split `--format` stdout into trimmed, non-blank lines. `.trim()` strips a
+ * trailing `\r` too, so CRLF output from a Windows-flavoured runtime is
+ * handled the same as `\n`. Shared by `findContainers` and `findImageTags` so
+ * the split/trim/blank-filter step can never drift out of lockstep between
+ * them — the per-call-site shape check that runs over the result stays
+ * distinct (see `CONTAINER_NAME_RE` / `IMAGE_REF_RE`), because container
+ * names and image references are not the same shape.
+ */
+function splitTemplateLines(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Shape of a single `{{.Names}}` token: starts with an alphanumeric,
+ * followed by alphanumeric, `.`, `_`, `/`, `@`, or `-`.
+ */
+const CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._/@-]*$/;
+
+/**
+ * Shape of a single `{{.Repository}}:{{.Tag}}` token: a whitespace-free
+ * repository (whose first `/`-separated component may carry a `:port`)
+ * joined to a `:`-free tag by the final `:`. Passes `<none>:<none>`,
+ * registry-qualified refs (`ghcr.io/org/img:tag`) and refs against a
+ * registry with an explicit port (`localhost:5000/org/img:tag`).
+ */
+const IMAGE_REF_RE = /^[^\s:]+(?::\d+)?(?:\/[^\s:]+)*:[^\s:]+$/;
+
+/**
  * Running container names belonging to this group. `nanoclaw-v2-<folder>-<ts>`.
  *
- * `unknown: true` means discovery did not run — no folder to match against, or
- * the runtime binary failed. It must never be presented as "nothing running".
+ * `unknown: true` means discovery did not run — no folder to match against,
+ * the runtime binary failed, OR it exited 0 with a line that does not match
+ * the container-name token shape (`CONTAINER_NAME_RE`) — a table row/header,
+ * compact JSON, or anything else instead of a bare name. It must never be
+ * presented as "nothing running".
  */
 export function findContainers(
   env: TeardownEnv,
@@ -552,12 +604,23 @@ export function findContainers(
       warnings: [`${CONTAINER_RUNTIME_BIN} ps failed: ${res.stderr.trim() || 'unknown error'}`],
     };
   }
+  const lines = splitTemplateLines(res.stdout);
+  const garbage = lines.find((l) => !CONTAINER_NAME_RE.test(l));
+  if (garbage !== undefined) {
+    return {
+      names: [],
+      unknown: true,
+      warnings: [
+        `${CONTAINER_RUNTIME_BIN} ps --format output does not look like the requested template ` +
+          `(line does not look like a container name: ${JSON.stringify(garbage)}) — the runtime may be ignoring ` +
+          '--format and printing something else (a table, JSON, …) instead. Running containers for this group ' +
+          'are NOT confirmed stopped.',
+      ],
+    };
+  }
   const re = new RegExp(`^nanoclaw-v2-${escapeRegExp(folder)}-\\d+$`);
   return {
-    names: res.stdout
-      .split('\n')
-      .map((s) => s.trim())
-      .filter((n) => re.test(n)),
+    names: lines.filter((n) => re.test(n)),
     unknown: false,
     warnings: [],
   };
@@ -566,17 +629,25 @@ export function findContainers(
 /**
  * Per-group image tags: `<base>:<agent-group-id>`, plus whatever the config records.
  *
- * `unknown: true` means discovery did not run — the runtime binary failed. It
- * must never be presented as "no image tag exists" — see the module header.
+ * `unknown: true` means discovery did not run — the runtime binary failed, OR
+ * it exited 0 with a line that does not match the `repo:tag` token shape
+ * (`IMAGE_REF_RE`). It must never be presented as "no image tag exists" —
+ * see the module header.
  *
- * Audited for the same parse-vs-exec gap `findOnecliAgent` had (TASK-29): there
- * is no parse step here that can fail. `--format '{{.Repository}}:{{.Tag}}'`
- * output is plain newline-delimited text, split/trimmed/filtered into a Set of
- * raw strings — none of which can throw on malformed input, unlike
- * `JSON.parse`. Garbage output just becomes a Set of strings that won't match
- * our candidate tag, which is indistinguishable from "checked, no tag exists"
- * — there is no exception to catch and no separate error state to surface. No
- * change needed here.
+ * TASK-29 audited this for a parse-vs-exec gap (`findOnecliAgent`'s
+ * `JSON.parse` failure mode) and found none: `--format
+ * '{{.Repository}}:{{.Tag}}'` output is plain newline-delimited text, and
+ * split/trim/filter into a Set of raw strings cannot throw the way
+ * `JSON.parse` can. TASK-30 found the gap that check missed: a runtime that
+ * ignores `--format` entirely and exits 0 with something else — a human
+ * table, OR compact JSON, OR an unpadded single-column header — needs no
+ * exception to reach the same dangerous end state — every such line simply
+ * fails the exact-membership check below and reads as "no tag exists",
+ * exactly as garbage would in `findContainers`. Guarded the same way: reject
+ * before the membership check if any non-blank line does not itself look
+ * like a `repo:tag` token (`IMAGE_REF_RE`) — a POSITIVE shape check, not a
+ * negative one keyed on whitespace, because a JSON line or a bare
+ * single-word header is whitespace-free and would sail through that.
  */
 export function findImageTags(
   env: TeardownEnv,
@@ -591,12 +662,21 @@ export function findImageTags(
       warnings: [`${CONTAINER_RUNTIME_BIN} images failed: ${res.stderr.trim() || 'unknown error'}`],
     };
   }
-  const existing = new Set(
-    res.stdout
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
+  const lines = splitTemplateLines(res.stdout);
+  const garbage = lines.find((l) => !IMAGE_REF_RE.test(l));
+  if (garbage !== undefined) {
+    return {
+      tags: [],
+      unknown: true,
+      warnings: [
+        `${CONTAINER_RUNTIME_BIN} images --format output does not look like the requested template ` +
+          `(line does not look like a repo:tag reference: ${JSON.stringify(garbage)}) — the runtime may be ` +
+          "ignoring --format and printing something else (a table, JSON, …) instead. This group's image tag " +
+          'is NOT confirmed absent.',
+      ],
+    };
+  }
+  const existing = new Set(lines);
   const candidates = new Set<string>([`${env.containerImageBase}:${agentGroupId}`]);
   // Only ever consider a config-recorded tag when it is unambiguously ours.
   if (configImageTag && configImageTag.endsWith(`:${agentGroupId}`)) candidates.add(configImageTag);

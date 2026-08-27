@@ -32,10 +32,13 @@
  *   1  usage error, or the target could not be resolved (nothing ran)
  *   2  executed but INCOMPLETE — the DB half committed, but at least one of
  *      the group directory, session directory, image tag, container stop or
- *      OneCLI vault agent was not dealt with — including when discovery of an
- *      image tag or the vault agent itself failed: docker/onecli unreachable,
- *      or onecli exiting 0 with output that cannot be parsed or is not the
- *      expected shape.
+ *      OneCLI vault agent was not dealt with — including when discovery of
+ *      containers, the image tag, or the vault agent itself failed:
+ *      docker/onecli unreachable; onecli exiting 0 with output that cannot be
+ *      parsed or is not the expected shape; or the container runtime exiting
+ *      0 with output that doesn't match the requested `--format` template's
+ *      shape (a table, JSON, or anything else instead of a bare container
+ *      name / `repo:tag` token).
  *      Read the INCOMPLETE block and re-run. Never treat 2 as success: a
  *      surviving OneCLI agent still holds injectable credentials for a group
  *      that no longer exists.
