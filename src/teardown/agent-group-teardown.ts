@@ -53,14 +53,23 @@
  *    surfaced as `(COULD NOT CHECK)` for containers, images AND the OneCLI
  *    agent, and all three are counted in `collectIncomplete` so the exit code
  *    reflects it too. This includes an exec that *succeeds* but returns
- *    output that cannot be parsed or is not the expected shape (TASK-29,
- *    round 2) — `findOnecliAgent` treats a `JSON.parse` failure, a
+ *    output that cannot be parsed or is not the expected shape. For
+ *    `findOnecliAgent` (TASK-29, round 2) that means a `JSON.parse` failure, a
  *    well-formed-but-unexpected value (a bare array, a scalar, `null`,
- *    `{"data":{}}`), and an exec failure all the same way, because each
- *    reaches the same dangerous end state behind exit 0: a live vault agent
- *    reported as `(none)`. `findImageTags` has no equivalent parse step (its
- *    output is plain text, not JSON) so it does not share the gap — see its
- *    docstring.
+ *    `{"data":{}}`), and an exec failure are all treated the same way, because
+ *    each reaches the same dangerous end state behind exit 0: a live vault
+ *    agent reported as `(none)`. `findImageTags` and `findContainers` have no
+ *    JSON to shape-check (their output is plain `--format` text), but they
+ *    share the same underlying risk one level down: a runtime that ignores
+ *    `--format` and exits 0 with a human-readable table instead. Every table
+ *    line then fails the exact-tag-membership check (`findImageTags`) or the
+ *    `^nanoclaw-v2-<folder>-\d+$` regex (`findContainers`), which is
+ *    indistinguishable from "checked, nothing found" — the same silent-(none)-
+ *    behind-exit-0 shape as the onecli case, reached through a malformed
+ *    *shape* instead of a parse exception (TASK-30). Both filters guard
+ *    against it with `looksLikeTableRow`, an output-form sanity check applied
+ *    before the match/membership step — see their docstrings for why a
+ *    capability probe was not used instead.
  *
  * See `docs/runbooks/agent-group-teardown.md` for the operator-facing runbook
  * and the full deletion order with FK evidence.
@@ -519,10 +528,32 @@ export function findOrphans(
 // ---------------------------------------------------------------------------
 
 /**
+ * True when a line requested via a Go `--format` template looks like it came
+ * from a human-readable table instead — e.g. because the runtime silently
+ * ignored `--format` and exited 0 anyway (TASK-30). Every template we request
+ * here (`{{.Names}}`, `{{.Repository}}:{{.Tag}}`) resolves to a single
+ * whitespace-free token per line — container names and image references are
+ * both restricted to `[a-zA-Z0-9_.:-]`-shaped strings by the runtimes
+ * themselves. A table row or header, by contrast, is column-padded and always
+ * contains internal whitespace. This is an output-form sanity check rather
+ * than a runtime capability probe: a probe would add a round-trip to every
+ * teardown and could itself be misreported by the same misbehaving runtime,
+ * whereas this reuses the exact bytes we already fetched. Callers must filter
+ * blank lines out before calling this — an empty line is not garbage, it is
+ * either a separator or genuinely-empty output, and must not be flagged.
+ */
+function looksLikeTableRow(line: string): boolean {
+  return /\s/.test(line);
+}
+
+/**
  * Running container names belonging to this group. `nanoclaw-v2-<folder>-<ts>`.
  *
- * `unknown: true` means discovery did not run — no folder to match against, or
- * the runtime binary failed. It must never be presented as "nothing running".
+ * `unknown: true` means discovery did not run — no folder to match against,
+ * the runtime binary failed, OR it exited 0 with output that does not look
+ * like the requested `--format` template (a table row/header instead of a
+ * bare name — see `looksLikeTableRow`). It must never be presented as
+ * "nothing running".
  */
 export function findContainers(
   env: TeardownEnv,
@@ -552,12 +583,25 @@ export function findContainers(
       warnings: [`${CONTAINER_RUNTIME_BIN} ps failed: ${res.stderr.trim() || 'unknown error'}`],
     };
   }
+  const lines = res.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const garbage = lines.find(looksLikeTableRow);
+  if (garbage !== undefined) {
+    return {
+      names: [],
+      unknown: true,
+      warnings: [
+        `${CONTAINER_RUNTIME_BIN} ps --format output does not look like the requested template ` +
+          `(line contains whitespace: ${JSON.stringify(garbage)}) — the runtime may be ignoring --format ` +
+          'and printing a table instead. Running containers for this group are NOT confirmed stopped.',
+      ],
+    };
+  }
   const re = new RegExp(`^nanoclaw-v2-${escapeRegExp(folder)}-\\d+$`);
   return {
-    names: res.stdout
-      .split('\n')
-      .map((s) => s.trim())
-      .filter((n) => re.test(n)),
+    names: lines.filter((n) => re.test(n)),
     unknown: false,
     warnings: [],
   };
@@ -566,17 +610,22 @@ export function findContainers(
 /**
  * Per-group image tags: `<base>:<agent-group-id>`, plus whatever the config records.
  *
- * `unknown: true` means discovery did not run — the runtime binary failed. It
- * must never be presented as "no image tag exists" — see the module header.
+ * `unknown: true` means discovery did not run — the runtime binary failed, OR
+ * it exited 0 with output that does not look like the requested `--format`
+ * template. It must never be presented as "no image tag exists" — see the
+ * module header.
  *
- * Audited for the same parse-vs-exec gap `findOnecliAgent` had (TASK-29): there
- * is no parse step here that can fail. `--format '{{.Repository}}:{{.Tag}}'`
- * output is plain newline-delimited text, split/trimmed/filtered into a Set of
- * raw strings — none of which can throw on malformed input, unlike
- * `JSON.parse`. Garbage output just becomes a Set of strings that won't match
- * our candidate tag, which is indistinguishable from "checked, no tag exists"
- * — there is no exception to catch and no separate error state to surface. No
- * change needed here.
+ * TASK-29 audited this for a parse-vs-exec gap (`findOnecliAgent`'s
+ * `JSON.parse` failure mode) and found none: `--format
+ * '{{.Repository}}:{{.Tag}}'` output is plain newline-delimited text, and
+ * split/trim/filter into a Set of raw strings cannot throw the way
+ * `JSON.parse` can. TASK-30 found the gap that check missed: a runtime that
+ * ignores `--format` entirely and exits 0 with a human table needs no
+ * exception to reach the same dangerous end state — every table line simply
+ * fails the exact-membership check below and reads as "no tag exists",
+ * exactly as garbage would in `findContainers`. Guarded the same way: reject
+ * before the membership check if any non-blank line looks like a table row
+ * rather than a bare `repo:tag` token (`looksLikeTableRow`).
  */
 export function findImageTags(
   env: TeardownEnv,
@@ -591,12 +640,23 @@ export function findImageTags(
       warnings: [`${CONTAINER_RUNTIME_BIN} images failed: ${res.stderr.trim() || 'unknown error'}`],
     };
   }
-  const existing = new Set(
-    res.stdout
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
+  const lines = res.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const garbage = lines.find(looksLikeTableRow);
+  if (garbage !== undefined) {
+    return {
+      tags: [],
+      unknown: true,
+      warnings: [
+        `${CONTAINER_RUNTIME_BIN} images --format output does not look like the requested template ` +
+          `(line contains whitespace: ${JSON.stringify(garbage)}) — the runtime may be ignoring --format ` +
+          "and printing a table instead. This group's image tag is NOT confirmed absent.",
+      ],
+    };
+  }
+  const existing = new Set(lines);
   const candidates = new Set<string>([`${env.containerImageBase}:${agentGroupId}`]);
   // Only ever consider a config-recorded tag when it is unambiguously ours.
   if (configImageTag && configImageTag.endsWith(`:${agentGroupId}`)) candidates.add(configImageTag);

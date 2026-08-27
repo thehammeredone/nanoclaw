@@ -180,6 +180,59 @@ describe('findContainers', () => {
     const res = findContainers(env, 'doomed');
     expect(res).toEqual({ names: [], unknown: false, warnings: [] });
   });
+
+  // TASK-30: a runtime that ignores `--format` can still exit 0 and print a
+  // human table instead of the requested `{{.Names}}` lines. Every table
+  // line then fails the `^nanoclaw-v2-<folder>-\d+$` match and the group
+  // reads as "no containers running" while one is still up. These two
+  // fixtures go through the same `env.exec` seam every other test in this
+  // file uses — CONTAINER_RUNTIME_BIN is 'docker' in this codebase today
+  // (the /convert-to-apple-container skill rewrites container-runtime.ts to
+  // change the binary to 'container', it does not change this filter code),
+  // so both fixtures are still dispatched under the 'docker ps' key. The
+  // second fixture's *shape* stands in for Apple Container's table output —
+  // Apple Container is macOS-only and cannot be run live from this
+  // Linux/WSL2 install, so this is explicitly NOT a verified live
+  // apple-container result, only a shape-equivalent fixture per AC#2.
+  it('flags "could not check" when the runtime prints a docker-shaped table instead of --format output', () => {
+    env.exec = fakeExec({
+      'docker ps': {
+        ok: true,
+        stdout: [
+          'CONTAINER ID   IMAGE                        COMMAND   CREATED       STATUS       PORTS   NAMES',
+          'abc123def456   nanoclaw-agent-v2:doomed     "bun run" 2 hours ago   Up 2 hours           nanoclaw-v2-doomed-1700000000',
+        ].join('\n'),
+        stderr: '',
+      },
+    });
+    const res = findContainers(env, 'doomed');
+    expect(res.names).toEqual([]);
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/does not look like/i);
+  });
+
+  it('flags "could not check" when the runtime prints an apple-container-shaped table instead of --format output (fixture only, not a live apple-container run)', () => {
+    env.exec = fakeExec({
+      'docker ps': {
+        ok: true,
+        stdout: [
+          'ID       IMAGE                        OS     ARCH   STATE    ADDR',
+          'a1b2c3   nanoclaw-agent-v2:doomed     linux  arm64  running  192.168.64.2',
+        ].join('\n'),
+        stderr: '',
+      },
+    });
+    const res = findContainers(env, 'doomed');
+    expect(res.names).toEqual([]);
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/does not look like/i);
+  });
+
+  it('does not treat a single legitimately-matching container name as garbage', () => {
+    env.exec = fakeExec({ 'docker ps': { ok: true, stdout: 'nanoclaw-v2-doomed-1700000000\n', stderr: '' } });
+    const res = findContainers(env, 'doomed');
+    expect(res).toEqual({ names: ['nanoclaw-v2-doomed-1700000000'], unknown: false, warnings: [] });
+  });
 });
 
 describe('findImageTags', () => {
@@ -195,6 +248,50 @@ describe('findImageTags', () => {
     env.exec = fakeExec({ 'docker images': { ok: true, stdout: '\n', stderr: '' } });
     const res = findImageTags(env, 'ag-doomed', null);
     expect(res).toEqual({ tags: [], unknown: false, warnings: [] });
+  });
+
+  // TASK-30 — see the equivalent findContainers block above for the fixture
+  // rationale (docker/apple-container shapes, live-apple-container caveat).
+  it('flags "could not check" when the runtime prints a docker-shaped table instead of --format output', () => {
+    env.exec = fakeExec({
+      'docker images': {
+        ok: true,
+        stdout: [
+          'REPOSITORY                   TAG         IMAGE ID       CREATED       SIZE',
+          'nanoclaw-agent-v2-testslug   ag-doomed   abcdef123456   2 hours ago   512MB',
+        ].join('\n'),
+        stderr: '',
+      },
+    });
+    const res = findImageTags(env, 'ag-doomed', null);
+    expect(res.tags).toEqual([]);
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/does not look like/i);
+  });
+
+  it('flags "could not check" when the runtime prints an apple-container-shaped table instead of --format output (fixture only, not a live apple-container run)', () => {
+    env.exec = fakeExec({
+      'docker images': {
+        ok: true,
+        stdout: [
+          'NAME                         TAG         DIGEST         SIZE',
+          'nanoclaw-agent-v2-testslug   ag-doomed   sha256:abcdef  512MB',
+        ].join('\n'),
+        stderr: '',
+      },
+    });
+    const res = findImageTags(env, 'ag-doomed', null);
+    expect(res.tags).toEqual([]);
+    expect(res.unknown).toBe(true);
+    expect(res.warnings.join()).toMatch(/does not look like/i);
+  });
+
+  it('does not treat a single legitimately-matching image tag as garbage', () => {
+    env.exec = fakeExec({
+      'docker images': { ok: true, stdout: 'nanoclaw-agent-v2-testslug:ag-doomed\n', stderr: '' },
+    });
+    const res = findImageTags(env, 'ag-doomed', null);
+    expect(res).toEqual({ tags: ['nanoclaw-agent-v2-testslug:ag-doomed'], unknown: false, warnings: [] });
   });
 });
 
