@@ -57,6 +57,7 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
 
   // roomId → user handle, used to rewrite inbound channel IDs.
   const roomToUserCache = new Map<string, string>();
+  const lastKnownRoomForUser = new Map<string, string>();
 
   function isUserHandle(threadId: string): boolean {
     try {
@@ -77,6 +78,17 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
     try {
       const { roomID } = adapter.decodeThreadId(resolved);
       roomToUserCache.set(roomID, userHandle);
+
+      const previous = lastKnownRoomForUser.get(userHandle);
+      if (previous && previous !== roomID) {
+        log.warn('Matrix: DM room ID changed for user handle within this process', {
+          userHandle,
+          previousRoomID: previous,
+          newRoomID: roomID,
+        });
+      }
+      lastKnownRoomForUser.set(userHandle, roomID);
+      log.info('Matrix: resolved DM room', { userHandle, roomID });
     } catch {
       // decode failure is non-fatal — outbound still works
     }
