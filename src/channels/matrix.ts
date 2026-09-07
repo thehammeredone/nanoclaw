@@ -104,11 +104,63 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
     }
   }
 
+  // openDM()'s reuse check (isUsableDirectRoom) trusts the client's local
+  // room store, which can be stale or incomplete for a room with little
+  // recent activity — confirmed 2026-09-07: Ann's DM room was recreated
+  // (a second time — she already had prior stray invites) 2+ hours into a
+  // stable process, no restart involved, right on the very first send to
+  // her ever attempted in that process. The sync-settle wait above only
+  // covers the startup race; this is a different manifestation of the same
+  // "local cache lies" problem. Before trusting openDM's local-cache-driven
+  // decision, ask the server directly (source of truth, not a mirror)
+  // whether the bot is still joined to whatever room we already have on
+  // file for this user, via loadPersistedDMRoomID/client.getJoinedRooms —
+  // both real adapter/SDK methods, just not part of either one's typed
+  // public surface. If still joined, reuse it and skip openDM entirely.
+  async function reuseKnownJoinedRoom(userHandle: string): Promise<string | null> {
+    const anyAdapter = adapter as unknown as {
+      loadPersistedDMRoomID?: (userId: string) => Promise<string | null>;
+      client?: { getJoinedRooms?: () => Promise<{ joined_rooms: string[] }> };
+    };
+    try {
+      const cachedRoomID = await anyAdapter.loadPersistedDMRoomID?.(userHandle);
+      if (!cachedRoomID || !anyAdapter.client?.getJoinedRooms) return null;
+
+      const { joined_rooms: joinedRooms } = await anyAdapter.client.getJoinedRooms();
+      if (!joinedRooms.includes(cachedRoomID)) {
+        log.warn('Matrix: cached DM room no longer joined server-side — falling through to openDM', {
+          userHandle,
+          cachedRoomID,
+        });
+        return null;
+      }
+
+      log.info('Matrix: reused cached DM room (confirmed joined server-side)', { userHandle, roomID: cachedRoomID });
+      return adapter.encodeThreadId({ roomID: cachedRoomID });
+    } catch (err) {
+      log.warn('Matrix: server-side joined-rooms check failed — falling through to openDM', { userHandle, err });
+      return null;
+    }
+  }
+
   async function resolveThreadId(threadId: string): Promise<string> {
     if (!isUserHandle(threadId)) return threadId;
 
     const userHandle = threadId.startsWith('matrix:') ? threadId.slice('matrix:'.length) : threadId;
     await waitForSyncSettled();
+
+    const reused = await reuseKnownJoinedRoom(userHandle);
+    if (reused) {
+      try {
+        const { roomID } = adapter.decodeThreadId(reused);
+        roomToUserCache.set(roomID, userHandle);
+        lastKnownRoomForUser.set(userHandle, roomID);
+      } catch {
+        // decode failure is non-fatal — outbound still works
+      }
+      return reused;
+    }
+
     log.info('Matrix: resolving DM room for user handle', { userHandle });
     const resolved = await adapter.openDM(userHandle);
 
