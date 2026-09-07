@@ -59,6 +59,42 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
   const roomToUserCache = new Map<string, string>();
   const lastKnownRoomForUser = new Map<string, string>();
 
+  // `liveSyncReady` flips true as soon as the SDK's sync state reaches
+  // Prepared/Syncing, but a specific room's membership state (lazy-loaded)
+  // can still be missing from the client's local store for a brief window
+  // after that. openDM()'s reuse check (isUsableDirectRoom) reads that local
+  // store, not the server, so a call landing in this window sees a real,
+  // joined DM room as "not usable" and creates a duplicate. Reproduced
+  // 2026-09-06: catch-up's fetchChannelMessages called resolveThreadId 174ms
+  // after "Matrix sync ready", which recreated Hammer's DM room. Give the
+  // client a fixed grace period after sync-ready before trusting its local
+  // room store for DM resolution.
+  const SYNC_SETTLE_GRACE_MS = 5000;
+  const SYNC_READY_TIMEOUT_MS = 30_000;
+  let syncSettledAt: number | null = null;
+
+  async function waitForSyncSettled(): Promise<void> {
+    const anyAdapter = adapter as unknown as { liveSyncReady?: boolean };
+    const deadline = Date.now() + SYNC_READY_TIMEOUT_MS;
+    while (!anyAdapter.liveSyncReady) {
+      if (Date.now() > deadline) {
+        log.warn('Matrix: giving up waiting for sync-ready before DM resolution', {
+          waitedMs: SYNC_READY_TIMEOUT_MS,
+        });
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    if (syncSettledAt === null) {
+      syncSettledAt = Date.now() + SYNC_SETTLE_GRACE_MS;
+    }
+    const remaining = syncSettledAt - Date.now();
+    if (remaining > 0) {
+      log.info('Matrix: waiting for room state to settle after initial sync', { remainingMs: remaining });
+      await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+  }
+
   function isUserHandle(threadId: string): boolean {
     try {
       const { roomID } = adapter.decodeThreadId(threadId);
@@ -72,6 +108,7 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
     if (!isUserHandle(threadId)) return threadId;
 
     const userHandle = threadId.startsWith('matrix:') ? threadId.slice('matrix:'.length) : threadId;
+    await waitForSyncSettled();
     log.info('Matrix: resolving DM room for user handle', { userHandle });
     const resolved = await adapter.openDM(userHandle);
 
