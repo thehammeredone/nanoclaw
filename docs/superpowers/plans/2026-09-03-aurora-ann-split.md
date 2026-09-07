@@ -223,97 +223,22 @@ Expected: the room ID is unchanged, and `logs/nanoclaw.log` shows no `Matrix: DM
 
 ---
 
-## Task 5: Extract shared Skylight credential reader
+## Task 5: Skylight credential reader — duplicated, not extracted (decided 2026-09-06)
+
+**Decision:** the user reviewed the extraction plan below and chose to skip it — 15 lines of file-parsing logic duplicated into Ann's seeder is not worth a shared module. Task 6's seeder (`scripts/setup-aurora-ann-agent.ts`) defines its own private `readSkylightEnv()`, copied verbatim from `scripts/setup-aurora-agent.ts`, instead of importing a shared one.
+
+**Consequence, called out explicitly per the user's request:** if the credential-reading logic ever needs to change (new config path, new field, format change), it must be updated in **both** `scripts/setup-aurora-agent.ts` and `scripts/setup-aurora-ann-agent.ts` — there is no single source of truth for it. `docs/runbooks/aurora-skylight-mcp.md` carries a note to this effect so a future change doesn't silently drift the two seeders apart.
+
+Task considered done as of this decision — no code change required.
+
+<details>
+<summary>Original extraction plan (not applied)</summary>
 
 **Context:** `scripts/setup-aurora-agent.ts` hardcodes `FOLDER = 'skylight-morning'` and reads credentials inline via a private `readSkylightEnv()`. Ann's clone needs the same credential-reading logic without duplicating it (DRY) or risking drift between the two seeders.
 
-**Files:**
-- Create: `scripts/skylight-credentials.ts`
-- Modify: `scripts/setup-aurora-agent.ts:85-115` (remove `readSkylightEnv`, import the shared one)
-- Test: `scripts/setup-aurora-agent.test.ts` (existing — must still pass unmodified)
+Would have created `scripts/skylight-credentials.ts` exporting `readSkylightEnv(): { email: string; password: string; frameId: string }`, with `setup-aurora-agent.ts` importing it instead of defining it locally. Superseded by the decision above.
 
-**Interfaces:**
-- Produces: `readSkylightEnv(): { email: string; password: string; frameId: string }` — same signature and behavior as the function being extracted (reads `~/.config/skylight/config.env` and `credentials.env`, throws if email/password/frameId missing).
-- Consumes (Task 6): the new script imports this same function.
-
-- [ ] **Step 1: Create the shared module**
-
-```typescript
-// scripts/skylight-credentials.ts
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-
-/**
- * Reads Skylight credentials from ~/.config/skylight/{config,credentials}.env.
- * Shared by every Aurora-family seeder script so credentials are never
- * hand-copied through a command or chat.
- */
-export function readSkylightEnv(): { email: string; password: string; frameId: string } {
-  const configPath = path.join(os.homedir(), '.config', 'skylight', 'config.env');
-  const credsPath = path.join(os.homedir(), '.config', 'skylight', 'credentials.env');
-
-  let email = '';
-  let password = '';
-  let frameId = '';
-
-  function parseEnvFile(filePath: string) {
-    try {
-      for (const line of fs.readFileSync(filePath, 'utf-8').split('\n')) {
-        const m = line.match(/^export\s+(\w+)=(.*)$/);
-        if (!m) continue;
-        const val = m[2].replace(/^['"]|['"]$/g, '').trim();
-        if (m[1] === 'SKYLIGHT_EMAIL') email = val;
-        if (m[1] === 'SKYLIGHT_PASSWORD') password = val;
-        if (m[1] === 'SKYLIGHT_FRAME_ID') frameId = val;
-      }
-    } catch { /* ignore missing */ }
-  }
-
-  parseEnvFile(configPath);
-  parseEnvFile(credsPath);
-
-  if (!email || !password)
-    throw new Error('SKYLIGHT_EMAIL/SKYLIGHT_PASSWORD not found in ~/.config/skylight/credentials.env');
-  if (!frameId)
-    throw new Error('SKYLIGHT_FRAME_ID not found in ~/.config/skylight/config.env');
-
-  return { email, password, frameId };
-}
-```
-
-- [ ] **Step 2: Update `setup-aurora-agent.ts` to use it**
-
-Remove lines 85-115 (the local `readSkylightEnv` definition) from `scripts/setup-aurora-agent.ts`, and add to the top imports:
-
-```typescript
-import { readSkylightEnv } from './skylight-credentials.js';
-```
-
-Leave every call site (`readSkylightEnv()` in `main()`) exactly as-is — only the definition moves.
-
-- [ ] **Step 3: Run the existing test suite for this script**
-
-Run: `cd /home/hammer/git/nanoclaw-v2 && pnpm test -- scripts/setup-aurora-agent.test.ts`
-Expected: PASS, unchanged — this refactor must not alter `decideSeederOutcome`/`runSeeder` behavior at all.
-
-- [ ] **Step 4: Commit**
-
-```bash
-cd /home/hammer/git/nanoclaw-v2
-git add scripts/skylight-credentials.ts scripts/setup-aurora-agent.ts
-git commit -m "$(cat <<'EOF'
-refactor(scripts): extract readSkylightEnv for reuse by Ann's seeder
-
-Both Aurora seeders need to read the same ~/.config/skylight
-credentials without duplicating the parsing logic or hand-copying
-secrets through a command.
-
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_012onPvvM3pd1zi7JNiQWLW4
-EOF
-)"
-```
+</details>
 
 ---
 
@@ -355,11 +280,47 @@ import {
   writeMcpServers,
 } from './mcp-servers-guard.js';
 import { decideSeederOutcome, runSeeder } from './setup-aurora-agent.js';
-import { readSkylightEnv } from './skylight-credentials.js';
 import { skylightBootstrapLine } from './skylight-mcp-bootstrap.js';
 import fs from 'fs';
+import os from 'os';
 import type { AgentGroup } from '../src/types.js';
 import type Database from 'better-sqlite3';
+
+// Duplicated from setup-aurora-agent.ts by deliberate choice (2026-09-06) —
+// see Task 5 in the plan this script was written from. If this parsing logic
+// ever needs to change, update both copies; see
+// docs/runbooks/aurora-skylight-mcp.md.
+function readSkylightEnv(): { email: string; password: string; frameId: string } {
+  const configPath = path.join(os.homedir(), '.config', 'skylight', 'config.env');
+  const credsPath = path.join(os.homedir(), '.config', 'skylight', 'credentials.env');
+
+  let email = '';
+  let password = '';
+  let frameId = '';
+
+  function parseEnvFile(filePath: string) {
+    try {
+      for (const line of fs.readFileSync(filePath, 'utf-8').split('\n')) {
+        const m = line.match(/^export\s+(\w+)=(.*)$/);
+        if (!m) continue;
+        const val = m[2].replace(/^['"]|['"]$/g, '').trim();
+        if (m[1] === 'SKYLIGHT_EMAIL') email = val;
+        if (m[1] === 'SKYLIGHT_PASSWORD') password = val;
+        if (m[1] === 'SKYLIGHT_FRAME_ID') frameId = val;
+      }
+    } catch { /* ignore missing */ }
+  }
+
+  parseEnvFile(configPath);
+  parseEnvFile(credsPath);
+
+  if (!email || !password)
+    throw new Error('SKYLIGHT_EMAIL/SKYLIGHT_PASSWORD not found in ~/.config/skylight/credentials.env');
+  if (!frameId)
+    throw new Error('SKYLIGHT_FRAME_ID not found in ~/.config/skylight/config.env');
+
+  return { email, password, frameId };
+}
 
 function parseArgs(argv: string[]): { force: boolean; dryRun: boolean } {
   let force = false;
