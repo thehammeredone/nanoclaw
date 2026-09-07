@@ -424,3 +424,9 @@ broken one.
   the `.sh` changes `args[1]`, so the re-run will show a diff and either prompt (interactive) or
   refuse and ask for `--force` (non-interactive). See the "Bumping the Skylight wheel" recipe
   above for the `--dry-run` → `--force` sequence.
+- **`readSkylightEnv()` is duplicated, not shared**, between `scripts/setup-aurora-agent.ts`
+  (Hammer) and `scripts/setup-aurora-ann-agent.ts` (Ann) — a deliberate call on 2026-09-06 to
+  skip extracting 15 lines of `.env`-parsing into a shared module. If the credential-reading
+  logic ever needs to change (new config path, new field, format change), **update both
+  copies** — there is no single source of truth for it and nothing will fail loudly if they
+  drift.
